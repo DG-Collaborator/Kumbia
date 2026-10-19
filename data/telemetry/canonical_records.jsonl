@@ -1,0 +1,72 @@
+{"timestamp": "2026-09-24T16:03:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch", "site": null, "vendor": null, "device_type": null, "power_watts": null, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 17.0}
+{"timestamp": "2026-09-24T16:06:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "site": null, "vendor": null, "device_type": null, "power_watts": 520.5, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 11.0}
+{"timestamp": "2026-09-24T16:07:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "site": null, "vendor": null, "device_type": null, "power_watts": 501.5, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 9.0}
+{"timestamp": "2026-09-24T16:08:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "site": null, "vendor": null, "device_type": null, "power_watts": 475.3, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 5.0}
+{"timestamp": "2026-09-24T16:09:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "site": null, "vendor": null, "device_type": null, "power_watts": 459.0, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T16:10:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "site": null, "vendor": null, "device_type": null, "power_watts": 447.5, "energy_kwh": null, "cpu_utilization": null, "gpu_utilization": null, "memory_utilization": null, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T16:11:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 460.0, "network_event_count": 3.0}
+{"timestamp": "2026-09-24T16:12:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 479.7, "network_event_count": 5.0}
+{"timestamp": "2026-09-24T17:55:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 533.0, "network_event_count": 12.0}
+{"timestamp": "2026-09-24T17:56:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 519.3, "network_event_count": 10.0}
+{"timestamp": "2026-09-24T17:57:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 499.6, "network_event_count": 8.0}
+{"timestamp": "2026-09-24T17:58:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 474.4, "network_event_count": 5.0}
+{"timestamp": "2026-09-24T17:59:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.2, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:00:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 447.8, "network_event_count": 1.0}
+{"timestamp": "2026-09-24T18:01:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.8, "network_event_count": 3.0}
+{"timestamp": "2026-09-24T18:02:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 481.1, "network_event_count": 4.0}
+{"timestamp": "2026-09-24T18:03:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 506.1, "network_event_count": 9.0}
+{"timestamp": "2026-09-24T18:04:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 521.0, "network_event_count": 11.0}
+{"timestamp": "2026-09-24T18:09:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.5, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:10:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 451.0, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:11:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 458.5, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:12:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 476.6, "network_event_count": 6.0}
+{"timestamp": "2026-09-24T18:13:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 501.3, "network_event_count": 7.0}
+{"timestamp": "2026-09-24T18:14:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 524.8, "network_event_count": 11.0}
+{"timestamp": "2026-09-24T18:15:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 531.5, "network_event_count": 12.0}
+{"timestamp": "2026-09-24T18:16:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 520.4, "network_event_count": 10.0}
+{"timestamp": "2026-09-24T18:17:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 501.0, "network_event_count": 8.0}
+{"timestamp": "2026-09-24T18:18:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 476.7, "network_event_count": 5.0}
+{"timestamp": "2026-09-24T18:19:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 455.4, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:20:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 452.4, "network_event_count": 1.0}
+{"timestamp": "2026-09-24T18:21:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 460.9, "network_event_count": 3.0}
+{"timestamp": "2026-09-24T18:22:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 477.2, "network_event_count": 4.0}
+{"timestamp": "2026-09-24T18:23:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 501.2, "network_event_count": 8.0}
+{"timestamp": "2026-09-24T18:24:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 523.5, "network_event_count": 11.0}
+{"timestamp": "2026-09-24T18:25:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 529.5, "network_event_count": 12.0}
+{"timestamp": "2026-09-24T18:26:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 522.9, "network_event_count": 11.0}
+{"timestamp": "2026-09-24T18:27:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 504.5, "network_event_count": 8.0}
+{"timestamp": "2026-09-24T18:28:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 475.3, "network_event_count": 5.0}
+{"timestamp": "2026-09-24T18:29:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.3, "network_event_count": 1.0}
+{"timestamp": "2026-09-24T18:30:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 448.8, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:31:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 458.1, "network_event_count": 2.0}
+{"timestamp": "2026-09-24T18:32:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 479.8, "network_event_count": 4.0}
+{"timestamp": "2026-09-25T11:17:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 504.0, "network_event_count": 8.0}
+{"timestamp": "2026-09-25T11:18:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 478.5, "network_event_count": 5.0}
+{"timestamp": "2026-09-25T11:19:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 459.7, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:20:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 450.9, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:31:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 470.3, "network_event_count": 4.0}
+{"timestamp": "2026-09-25T11:32:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 475.6, "network_event_count": 5.0}
+{"timestamp": "2026-09-25T11:33:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 500.8, "network_event_count": 9.0}
+{"timestamp": "2026-09-25T11:34:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 520.5, "network_event_count": 12.0}
+{"timestamp": "2026-09-25T11:35:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 529.8, "network_event_count": 12.0}
+{"timestamp": "2026-09-25T11:36:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 519.9, "network_event_count": 11.0}
+{"timestamp": "2026-09-25T11:37:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 500.9, "network_event_count": 8.0}
+{"timestamp": "2026-09-25T11:38:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 477.4, "network_event_count": 4.0}
+{"timestamp": "2026-09-25T11:39:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.1, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:40:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 452.3, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:41:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 458.0, "network_event_count": 1.0}
+{"timestamp": "2026-09-25T11:42:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 478.1, "network_event_count": 5.0}
+{"timestamp": "2026-09-25T11:43:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 506.1, "network_event_count": 8.0}
+{"timestamp": "2026-09-25T11:44:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 524.4, "network_event_count": 12.0}
+{"timestamp": "2026-09-25T11:45:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 531.3, "network_event_count": 11.0}
+{"timestamp": "2026-09-25T11:46:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 521.6, "network_event_count": 10.0}
+{"timestamp": "2026-09-25T11:47:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 499.2, "network_event_count": 7.0}
+{"timestamp": "2026-09-25T11:48:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 476.1, "network_event_count": 5.0}
+{"timestamp": "2026-09-25T11:49:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 456.5, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:50:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 448.6, "network_event_count": 1.0}
+{"timestamp": "2026-09-25T11:51:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 459.2, "network_event_count": 2.0}
+{"timestamp": "2026-09-25T11:52:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 480.2, "network_event_count": 5.0}
+{"timestamp": "2026-09-25T11:53:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 506.0, "network_event_count": 8.0}
+{"timestamp": "2026-09-25T11:54:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 520.3, "network_event_count": 10.0}
+{"timestamp": "2026-09-25T11:55:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 529.7, "network_event_count": 12.0}
+{"timestamp": "2026-09-25T11:56:00Z", "asset_id": "FBA-1", "source_system": "elasticsearch+synthetic_dcim", "power_watts": 521.3, "network_event_count": 11.0}

@@ -1,7 +1,9 @@
-"""Point at an Elasticsearch _search endpoint and produce a DataTable. Fully
- generic — handles both aggregation responses (buckets) and plain hit
- responses, with no knowledge of any specific index or persona.
- """
+"""
+   Point at an Elasticsearch _search endpoint and produce a DataTable. Fully
+   generic — handles aggregation responses (buckets, including composite
+   aggregations whose bucket key is an object) and plain hit responses, with no
+   knowledge of any specific index or persona.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -40,38 +42,52 @@ class ElasticsearchDataSource:
 
 
 def _table_from_aggregations(aggregations: dict) -> DataTable:
-    bucket_agg = next(
-        ((name, value) for name, value in aggregations.items()
-         if isinstance(value, dict) and isinstance(value.get("buckets"), list)),
-        None,
-    )
+      bucket_agg = next(
+          ((name, value) for name, value in aggregations.items()
+           if isinstance(value, dict) and isinstance(value.get("buckets"), list)),
+          None,
+      )
 
-    if bucket_agg is None:
-        cells = {name: _stringify(value.get("value", value) if isinstance(value, dict) else value)
-                 for name, value in aggregations.items()}
-        return DataTable(columns=[DataColumn(key=k) for k in cells], rows=[DataRow(cells)])
+      if bucket_agg is None:
+          cells = {name: _stringify(value.get("value", value) if isinstance(value, dict) else value)
+                   for name, value in aggregations.items()}
+          return DataTable(columns=[DataColumn(key=k) for k in cells], rows=[DataRow(cells)])
 
-    _, bucket_value = bucket_agg
-    buckets = bucket_value["buckets"]
+      _, bucket_value = bucket_agg
+      buckets = bucket_value["buckets"]
 
-    column_keys: dict[str, None] = {"key": None, "doc_count": None}
-    rows: list[DataRow] = []
-    for bucket in buckets:
-        if not isinstance(bucket, dict):
-            continue
-        cells = {
-            "key": _stringify(bucket.get("key")),
-            "doc_count": _stringify(bucket.get("doc_count")),
-        }
-        for name, value in bucket.items():
-            if name in ("key", "doc_count", "key_as_string"):
-                continue
-            metric_value = value.get("value") if isinstance(value, dict) else None
-            cells[name] = _stringify(metric_value) if metric_value is not None else ""
-            column_keys[name] = None
-        rows.append(DataRow(cells))
+      column_keys: dict[str, None] = {}
+      rows: list[DataRow] = []
+      for bucket in buckets:
+          if not isinstance(bucket, dict):
+              continue
+          cells = _key_cells(bucket.get("key"))
+          cells["doc_count"] = _stringify(bucket.get("doc_count"))
+          for name, value in bucket.items():
+              if name in ("key", "doc_count", "key_as_string"):
+                  continue
+              metric_value = value.get("value") if isinstance(value, dict) else None
+              cells[name] = _stringify(metric_value) if metric_value is not None else ""
+          for column_key in cells:
+              column_keys[column_key] = None
+          rows.append(DataRow(cells))
 
-    return DataTable(columns=[DataColumn(key=k) for k in column_keys], rows=rows)
+      # no buckets at all: keep the same "key, doc_count" header a plain terms/histogram agg always had
+      column_keys = column_keys or {"key": None, "doc_count": None}
+      return DataTable(columns=[DataColumn(key=k) for k in column_keys], rows=rows)
+
+
+def _key_cells(key: Any) -> dict[str, str]:
+    """
+       A terms/histogram bucket's key is a scalar and stays one "key" column.
+       A composite aggregation's key is an object ({"host": ..., "ts": ...}),
+       one entry per named source — each becomes its own "key.<source>"
+       column instead of one stringified JSON blob, so callers can read
+       individual parts of a composite key the same way as any other column.
+    """
+    if isinstance(key, dict):
+        return {f"key.{source_name}": _stringify(value) for source_name, value in key.items()}
+    return {"key": _stringify(key)}
 
 
 def _table_from_hits(root: dict) -> DataTable:

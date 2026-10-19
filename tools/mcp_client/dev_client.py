@@ -17,12 +17,16 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-SERVER_SCRIPT = Path(__file__).resolve().parents[2] / "src" / "kumbia" / "mcp_server" / "main.py"
+SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+SERVER_SCRIPT = SRC_DIR / "kumbia" / "mcp_server" / "main.py"
 
 SERVER_PARAMS = StdioServerParameters(
     command=sys.executable,  # the same interpreter running this script — guarantees the venv's kumbia/mcp installs are used
     args=[str(SERVER_SCRIPT)],
-    env=None,
+    # StdioServerParameters strips almost the entire environment by default
+    # (only HOME/LOGNAME/PATH/SHELL/TERM/USER survive) — PYTHONPATH must be
+    # passed explicitly or the spawned server can't import kumbia at all.
+    env={"PYTHONPATH": str(SRC_DIR)},
 )
 
 
