@@ -17,11 +17,12 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from kumbia.core.source.source_query import Credentials, SourceQuery
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_INSTANCE_RE = re.compile(r"^[A-Za-z0-9.:_\-\[\]]+$")
 
 
 @dataclass(frozen=True)
@@ -138,10 +139,76 @@ def es_network_window(
     )
 
 
+def prometheus_compute_window(
+        base_url: str,
+        window: TimeWindow,
+        instances: list[str],
+        bucket_minutes: int,
+        credentials: Credentials | None = None,
+        identity_label: str = "instance",
+        cpu_metric: str = "node_cpu_seconds_total",
+        max_points: int = 11000,
+) -> SourceQuery:
+    """
+       Average CPU utilization (0-100) per (instance, time bucket) inside the
+       window, as one Prometheus range query. PrometheusDataSource turns the
+       matrix response into rows with the series' labels plus timestamp and
+       value columns.
+
+       Evaluated once per bucket (step = bucket size) at each bucket's start,
+       with the rate looking forward over that bucket (offset -bucket), so a
+       value's timestamp floors into the bucket it actually describes, the
+       same bucket the power and network readings for that span land in.
+       end is pulled back one second to keep the window half-open.
+
+       Filtered to instances (the registry's known compute identities), so
+       unregistered targets never come back. Prometheus caps a range query at
+       11,000 points per series, so instead of being rejected there, this
+       refuses a window that would exceed it.
+    """
+    if not instances:
+        raise ValueError("prometheus_compute_window needs at least one instance to filter on.")
+    for identifier in (identity_label, cpu_metric):
+        _require_identifier(identifier)
+
+    points = math.ceil(window.minutes / bucket_minutes)
+    if points > max_points:
+        raise ValueError(
+            f"Window would produce {points} points per series (> {max_points}); use a shorter window."
+        )
+
+    instance_pattern = "|".join(_promql_regex_literal(instance) for instance in instances)
+    rate_range = f"{bucket_minutes}m"
+    promql = (
+        f"100 * (1 - avg by ({identity_label}) ("
+        f'rate({cpu_metric}{{mode="idle",{identity_label}=~"{instance_pattern}"}}[{rate_range}] offset -{rate_range})'
+        f"))"
+    )
+    statement = {
+        "query": promql,
+        "start": window.start_iso,
+        "end": _iso(window.end - timedelta(seconds=1)),
+        "step": f"{bucket_minutes * 60}s",
+    }
+    return SourceQuery(address=base_url.rstrip("/"), statement=json.dumps(statement), credentials=credentials)
+
+
 def _require_identifier(name: str) -> None:
-    """SQL identifiers can't be bound as parameters, so they're restricted to plain names instead."""
+    """SQL/PromQL identifiers can't be bound as parameters, so they're restricted to plain names instead."""
     if not _IDENTIFIER_RE.fullmatch(name):
         raise ValueError(f"Not a plain SQL identifier: {name!r}")
+
+
+def _promql_regex_literal(value: str) -> str:
+    """
+       A label value as an exact-match alternative inside a PromQL =~ string.
+       Restricted to host:port characters first, so it can't close the quoted
+       string or add matchers; then regex-escaped, with backslashes doubled
+       because PromQL string literals unescape them once.
+    """
+    if not _INSTANCE_RE.fullmatch(value):
+        raise ValueError(f"Not a plain host:port label value: {value!r}")
+    return re.escape(value).replace("\\", "\\\\")
 
 
 def _iso(dt: datetime) -> str:

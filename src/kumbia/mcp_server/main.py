@@ -16,6 +16,7 @@ from kumbia.core.net.http_client import create_http_client
 from kumbia.core.source.elasticsearch_data_source import ElasticsearchDataSource
 from kumbia.core.source.empty_data_source import EmptyDataSource
 from kumbia.core.source.jsonl_table_source import JsonlTableSource
+from kumbia.core.source.prometheus_data_source import PrometheusDataSource
 from kumbia.core.source.source_query import Credentials, SourceQuery
 from kumbia.core.source.sql_data_source import SqlDataSource
 from kumbia.core.source.tavily_search_source import TavilySearchSource
@@ -41,7 +42,7 @@ from kumbia.telemetry.asset_registry import AssetRegistry
 from kumbia.telemetry.collector import TelemetryCollector
 from kumbia.telemetry.correlation_engine import SourceMapping
 from kumbia.telemetry.pipeline import TelemetryCorrelationPipeline, TelemetryStream
-from kumbia.telemetry.stream_queries import es_network_window, sql_power_window
+from kumbia.telemetry.stream_queries import es_network_window, prometheus_compute_window, sql_power_window
 
 load_dotenv()
 
@@ -60,6 +61,18 @@ elasticsearch_credentials = (
     if elasticsearch_username and elasticsearch_password
     else None
 )
+
+# Prometheus connection, used by the telemetry compute stream — built once
+# here, same as Elasticsearch above. Credentials are optional
+prometheus_url = os.environ.get("PROMETHEUS_URL")
+prometheus_username = os.environ.get("PROMETHEUS_USERNAME")
+prometheus_password = os.environ.get("PROMETHEUS_PASSWORD")
+prometheus_credentials = (
+    Credentials(prometheus_username, prometheus_password)
+    if prometheus_username and prometheus_password
+    else None
+)
+
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 
 # optional: enables network_activity_report/drilldown; registers no-op unless
@@ -175,11 +188,16 @@ telemetry_poll_interval_seconds = float(os.environ.get("TELEMETRY_POLL_INTERVAL_
 telemetry_network_host_ip = os.environ.get("TELEMETRY_NETWORK_HOST_IP")
 telemetry_es_index_pattern = os.environ.get("TELEMETRY_ES_INDEX_PATTERN", "network-activity-*")
 telemetry_network_enabled = bool(elasticsearch_url and telemetry_network_host_ip)
+telemetry_compute_instance = os.environ.get("TELEMETRY_COMPUTE_INSTANCE")
+telemetry_compute_enabled = bool(prometheus_url and telemetry_compute_instance)
+
 
 if power_telemetry_db_path.exists():
     asset_identities = {"pdu_outlet": TELEMETRY_POWER_OUTLET}
     if telemetry_network_enabled:
         asset_identities["ip_address"] = telemetry_network_host_ip
+    if telemetry_compute_enabled:
+        asset_identities["instance"] = telemetry_compute_instance
     telemetry_registry = AssetRegistry({TELEMETRY_ASSET_ID: asset_identities})
 
     telemetry_pipeline = TelemetryCorrelationPipeline(
@@ -192,10 +210,9 @@ if power_telemetry_db_path.exists():
                     metric_columns={"watts": "power_watts"}, source_system="synthetic_dcim",
                 ),
             ),
-            # placeholder until Prometheus is reachable and the real "instance" identity is known
             TelemetryStream(
                 "compute",
-                EmptyDataSource(),
+                PrometheusDataSource(http_client) if telemetry_compute_enabled else EmptyDataSource(),
                 SourceMapping(
                     identity_type="instance", identity_column="instance", timestamp_column="timestamp",
                     metric_columns={"value": "cpu_utilization"}, source_system="prometheus",
@@ -216,7 +233,14 @@ if power_telemetry_db_path.exists():
 
     telemetry_query_builders = {
         "power": lambda window: sql_power_window(str(power_telemetry_db_path), window),
-        "compute": lambda window: SourceQuery(address="unconfigured"),
+        "compute": (
+            (lambda window: prometheus_compute_window(
+                prometheus_url, window,
+                [telemetry_compute_instance], telemetry_bucket_minutes, prometheus_credentials,
+            ))
+            if telemetry_compute_enabled
+            else (lambda window: SourceQuery(address="unconfigured"))
+        ),
         "network": (
             (lambda window: es_network_window(
                 elasticsearch_url, telemetry_es_index_pattern, window,
