@@ -1,18 +1,21 @@
 """Dev-only: a small local web UI for demoing Kumbia. It is just another MCP
-  host: at startup it opens ONE persistent MCP session to the Kumbia server
-  (launched exactly like dev_client.py launches it) and keeps it for the life
-  of the app, so chat keeps its turn history and background telemetry
-  collection keeps running between clicks. Each endpoint below makes one tool
-  call or resource read; nothing here imports Kumbia's own code. Also starts
-  and stops the telemetry simulators, so the whole demo runs from one window.
+   host: at startup it opens ONE persistent MCP session to the Kumbia server
+   (launched exactly like dev_client.py launches it) and keeps it for the life
+   of the app, so chat keeps its turn history and background telemetry
+   collection keeps running between clicks. Each endpoint below makes one tool
+   call or resource read; nothing here imports Kumbia's own code. Also starts
+   and stops the telemetry simulators, so the whole demo runs from one window.
 
-  Usage:
-      .venv/bin/python tools/demo_ui/server.py            # then open http://localhost:8000
-      .venv/bin/python tools/demo_ui/server.py --port 8080
+   Usage:
+       .venv/bin/python tools/demo_ui/server.py            # then open http://localhost:8000
+       .venv/bin/python tools/demo_ui/server.py --host 19.51.0.74 --port 8080
 
-  Listens on 127.0.0.1 only. Stopping it (Ctrl+C) stops collection first, so
-  an in-flight cycle finishes writing, then stops the simulators.
-  """
+   Listens on 127.0.0.1 unless --host names an interface address (or 0.0.0.0
+   for all). There is no auth: anyone who can reach that address can chat,
+   spend API credits, and start/stop the simulators. Stopping it (Ctrl+C)
+   stops collection first, so an in-flight cycle finishes writing, then stops
+   the simulators.
+   """
 from __future__ import annotations
 
 import argparse
@@ -98,7 +101,6 @@ def _int(body: dict, field: str, default: int) -> int:
 
 
 # ---------- page ----------
-
 async def index(request: Request) -> FileResponse | PlainTextResponse:
     page = HERE / "index.html"
     if not page.exists():
@@ -144,7 +146,8 @@ async def network_report(request: Request) -> JSONResponse:
 async def power(request: Request) -> JSONResponse:
     body = await _json_body(request)
     question = _required_text(body, "question") or "What was the most recent power reading for R42-U18?"
-    return await _call_tool(request, "power_telemetry_report", {"question": question, "limit": _int(body, "limit", 5)})
+    return await _call_tool(request, "power_telemetry_report", {"question": question, "limit": _int(body, "limit",
+                                                                                                    5)})
 
 
 # ---------- telemetry ----------
@@ -179,7 +182,8 @@ async def telemetry_ask(request: Request) -> JSONResponse:
     question = _required_text(body, "question")
     if question is None:
         return _error(400, "Type a question about the telemetry first.")
-    return await _call_tool(request, "correlated_telemetry_report", {"question": question, "limit": _int(body, "limit", 60)})
+    return await _call_tool(request, "correlated_telemetry_report", {"question": question, "limit": _int(body,
+                                                                                                         "limit", 60)})
 
 
 # ---------- simulators ----------
@@ -228,11 +232,14 @@ app = Starlette(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Local demo UI for Kumbia.")
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    print(f"Kumbia demo UI: http://localhost:{args.port}  (Ctrl+C to stop)")
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    def main() -> None:
+        parser = argparse.ArgumentParser(description="Local demo UI for Kumbia.")
+        parser.add_argument("--host", default="127.0.0.1", help="interface IP to bind; 0.0.0.0 for all")
+        parser.add_argument("--port", type=int, default=8000)
+        args = parser.parse_args()
+        shown = "localhost" if args.host == "127.0.0.1" else args.host
+        print(f"Kumbia demo UI: http://{shown}:{args.port}  (Ctrl+C to stop)")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
