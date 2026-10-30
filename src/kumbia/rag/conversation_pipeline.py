@@ -35,7 +35,8 @@
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from kumbia.core.domain.data_table import DataTable
@@ -54,11 +55,35 @@ _NARRATION_INSTRUCTIONS = (
     "peaks, changes, and relationships exactly as given."
 )
 
+_ROUTING_INSTRUCTIONS = (
+    "You decide whether a user's message needs one of the data skills listed "
+    "below. Reply with exactly one skill name from the list, or with none if the "
+    "message is small talk, general knowledge, or not about any listed skill's "
+    "data. Reply with the name only, no other words."
+)
+
+_ROUTING_HISTORY_TURNS = 4
+
 
 @dataclass
 class Turn:
     role: str  # "user" or "assistant"
     text: str
+
+
+@dataclass(frozen=True)
+class Skill:
+    """
+       A data-backed capability ask() may route a chat turn to. run takes the
+       user's question and returns a finished answer; what it fetches, which
+       already-built SourceQuery it uses, and how it computes figures are all
+       fixed by whoever registers it. The LLM only ever picks a skill by name,
+       never builds a query — the same structural boundary as
+       query_structured_source, applied to free-form chat.
+    """
+    name: str
+    description: str
+    run: Callable[[str], Awaitable[str]]
 
 
 class ConversationPipeline:
@@ -74,6 +99,11 @@ class ConversationPipeline:
         self._memory_index = InMemoryVectorIndex()
         self._memory_top_k = memory_top_k
         self._memory_loaded = False
+        self._skills: dict[str, Skill] = {}
+
+    def add_skill(self, skill: Skill) -> None:
+        """Makes skill reachable from ask(). Registered by the composition layer, never by the LLM."""
+        self._skills[skill.name] = skill
 
     @property
     def turn_count(self) -> int:
@@ -202,18 +232,51 @@ class ConversationPipeline:
         self._memory_index.add(answer, vector)
 
     async def ask(self, text: str) -> str:
+        """
+           Continues the conversation. When skills are registered, first asks
+           the LLM whether text needs one; if so the skill answers (from real
+           data) and that answer becomes the assistant's turn, otherwise the
+           reply is generated from history and remembered facts as before.
+        """
         await self.ensure_memory_loaded()
+        skill = await self._route(text)
         self._history.append(Turn("user", text))
 
-        memory_context: list[str] = []
-        if self._memory_index.size > 0:
-            query_vector = await self._llm.embed(text)
-            memory_context = self._memory_index.search(query_vector, self._memory_top_k)
+        if skill is not None:
+            reply = f"(answered from {skill.name})\n\n{await skill.run(text)}"
+        else:
+            memory_context: list[str] = []
+            if self._memory_index.size > 0:
+                query_vector = await self._llm.embed(text)
+                memory_context = self._memory_index.search(query_vector, self._memory_top_k)
 
-        prompt = _build_prompt(self._history, memory_context)
-        reply = await self._llm.generate(prompt, system_prompt=self._persona.system_prompt)
+            prompt = _build_prompt(self._history, memory_context)
+            reply = await self._llm.generate(prompt, system_prompt=self._persona.system_prompt)
         self._history.append(Turn("assistant", reply))
         return reply
+
+    async def _route(self, text: str) -> Skill | None:
+        """
+           One short LLM call choosing a skill by name. Anything other than
+           exactly one recognizable skill name (none, an unknown name, two
+           names) falls back to plain conversation rather than guessing.
+        """
+        if not self._skills:
+            return None
+        catalog = "\n".join(f"- {skill.name}: {skill.description}" for skill in self._skills.values())
+        recent = "\n".join(
+            f"{'User' if turn.role == 'user' else 'Assistant'}: {turn.text}"
+            for turn in self._history[-_ROUTING_HISTORY_TURNS:]
+        )
+        prompt = (
+            f"Skills:\n{catalog}\n\n"
+            + (f"Recent conversation:\n{recent}\n\n" if recent else "")
+            + f"Message: {text}\nSkill:"
+        )
+        choice = await self._llm.generate(prompt, system_prompt=_ROUTING_INSTRUCTIONS)
+        named = set(re.findall(r"[a-z0-9_]+", choice.lower()))
+        matches = [skill for name, skill in self._skills.items() if name in named]
+        return matches[0] if len(matches) == 1 else None
 
     def reset(self) -> None:
         self._history.clear()

@@ -232,14 +232,13 @@ app = Starlette(
 
 
 def main() -> None:
-    def main() -> None:
-        parser = argparse.ArgumentParser(description="Local demo UI for Kumbia.")
-        parser.add_argument("--host", default="127.0.0.1", help="interface IP to bind; 0.0.0.0 for all")
-        parser.add_argument("--port", type=int, default=8000)
-        args = parser.parse_args()
-        shown = "localhost" if args.host == "127.0.0.1" else args.host
-        print(f"Kumbia demo UI: http://{shown}:{args.port}  (Ctrl+C to stop)")
-        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    parser = argparse.ArgumentParser(description="Local demo UI for Kumbia.")
+    parser.add_argument("--host", default="127.0.0.1", help="interface IP to bind; 0.0.0.0 for all")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    shown = "localhost" if args.host == "127.0.0.1" else args.host
+    print(f"Kumbia demo UI: http://{shown}:{args.port}  (Ctrl+C to stop)")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

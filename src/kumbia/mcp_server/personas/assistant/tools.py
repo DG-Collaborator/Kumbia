@@ -5,6 +5,8 @@
        Tool bodies stay thin — all conversation/memory logic lives in the
        pipeline, and all telemetry figures are computed in telemetry.analysis;
        this file only adapts MCP's argument/return shape to those calls.
+       Each data tool is also added to the pipeline as a Skill, so
+       answer_question can route a chat message to the same fixed query.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
 from kumbia.core.source.source_query import SourceQuery
-from kumbia.rag.conversation_pipeline import ConversationPipeline
+from kumbia.rag.conversation_pipeline import ConversationPipeline, Skill
 from kumbia.telemetry.analysis import summary_text
 
 _MAX_POWER_TELEMETRY_LIMIT = 500
@@ -33,6 +35,9 @@ def register_assistant_tools(mcp: MCPServer, pipeline: ConversationPipeline) -> 
            Maintains turn history across calls within this server process, so
            follow-up questions can refer back to earlier turns, and answers
            are grounded in the persona's remembered facts when relevant.
+           Questions about data the persona can reach (telemetry, power,
+           web search when asked) are routed to that data tool and answered
+           from it; the reply names which one was used.
         """
         return await pipeline.ask(text)
 
@@ -73,6 +78,15 @@ def register_assistant_resources(mcp: MCPServer, pipeline: ConversationPipeline,
 
 def register_web_search_tool(mcp: MCPServer, pipeline: ConversationPipeline) -> None:
 
+    async def search(query: str) -> str:
+        return await pipeline.query_data_source("web_search", query)
+
+    pipeline.add_skill(Skill(
+        name="web_search",
+        description="look something up on the internet. Only when the user explicitly asks to search or check online.",
+        run=search,
+    ))
+
     @mcp.tool()
     async def web_search(query: str) -> str:
         """
@@ -83,10 +97,25 @@ def register_web_search_tool(mcp: MCPServer, pipeline: ConversationPipeline) -> 
            internet. Successful lookups are cached, so the same question
            won't need a re-search next time.
         """
-        return await pipeline.query_data_source("web_search", query)
+        return await search(query)
 
 
 def register_power_telemetry_tool(mcp: MCPServer, pipeline: ConversationPipeline, db_path: Path) -> None:
+
+    async def report(question: str, limit: int = 20) -> str:
+        bounded_limit = max(1, min(int(limit), _MAX_POWER_TELEMETRY_LIMIT))
+        query = SourceQuery(
+            address=str(db_path),
+            statement=f"SELECT * FROM power_readings ORDER BY ts DESC LIMIT {bounded_limit}",
+        )
+        return await pipeline.query_structured_source("power_telemetry", query, question)
+
+    pipeline.add_skill(Skill(
+        name="power_telemetry_report",
+        description="the latest raw power readings (PDU outlet, timestamp, watts). "
+                    "For the current or most recent power reading of an outlet.",
+        run=report,
+    ))
 
     @mcp.tool()
     async def power_telemetry_report(question: str, limit: int = 20) -> str:
@@ -97,15 +126,25 @@ def register_power_telemetry_tool(mcp: MCPServer, pipeline: ConversationPipeline
            (newest first, capped at 500) and answers using only that data —
            the SQL itself is fixed here, never built from the question.
         """
-        bounded_limit = max(1, min(int(limit), _MAX_POWER_TELEMETRY_LIMIT))
-        query = SourceQuery(
-            address=str(db_path),
-            statement=f"SELECT * FROM power_readings ORDER BY ts DESC LIMIT {bounded_limit}",
-        )
-        return await pipeline.query_structured_source("power_telemetry", query, question)
+        return await report(question, limit)
 
 
 def register_correlated_telemetry_tool(mcp: MCPServer, pipeline: ConversationPipeline, store_path: Path) -> None:
+
+    async def report(question: str, limit: int = 60) -> str:
+        bounded_limit = max(1, min(int(limit), _MAX_CORRELATED_TELEMETRY_LIMIT))
+        query = SourceQuery(address=str(store_path), statement=json.dumps({"last": bounded_limit}))
+        return await pipeline.narrate_structured_source(
+            "correlated_telemetry", query, question, summarize=summary_text,
+        )
+
+    pipeline.add_skill(Skill(
+        name="correlated_telemetry_report",
+        description="collected telemetry over time per asset: power draw (watts), CPU utilization, "
+                    "and network activity (event counts per time bucket, incl. traffic/ingress/egress "
+                    "questions). For trends, peaks, lows, changes, and how these metrics relate.",
+        run=report,
+    ))
 
     @mcp.tool()
     async def correlated_telemetry_report(question: str, limit: int = 60) -> str:
@@ -121,8 +160,4 @@ def register_correlated_telemetry_tool(mcp: MCPServer, pipeline: ConversationPip
            telemetry collection has been started; the query itself is fixed
            here, never built from the question.
         """
-        bounded_limit = max(1, min(int(limit), _MAX_CORRELATED_TELEMETRY_LIMIT))
-        query = SourceQuery(address=str(store_path), statement=json.dumps({"last": bounded_limit}))
-        return await pipeline.narrate_structured_source(
-            "correlated_telemetry", query, question, summarize=summary_text,
-        )
+        return await report(question, limit)
