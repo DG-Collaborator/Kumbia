@@ -20,11 +20,17 @@ class FieldMapping:
        of a skill/tool name) to any aggregatable field worth breaking traffic
        down by (an app name, a destination port, a country, ...). Empty means
        "just the DNS field", which every Gigamon AMI-shaped index has.
+
+       drilldown_fields limits which fields a drilldown fetches per event.
+       Wide enriched records can carry hundreds of fields; fetching only the
+       ones worth reasoning about keeps each event small to embed. Empty
+       means every field (the index's whole _source).
     """
     host_field: str = "host.ip"
     dns_field: str = "gigamon.ami.dns_name"
     timestamp_field: str = "@timestamp"
     breakdown_fields: dict[str, str] = field(default_factory=dict)
+    drilldown_fields: tuple[str, ...] = ()
 
     def breakdowns(self) -> dict[str, str]:
         return dict(self.breakdown_fields) or {"dns": self.dns_field}
@@ -127,7 +133,7 @@ def raw_hits(window: TimeWindow, host_ip: str, max_events: int, fields: FieldMap
     if not _is_ip_literal(host_ip):
         raise ValueError(f"host_ip must be a plain IPv4/IPv6 address, got: {host_ip!r}")
 
-    return json.dumps({
+    body: dict = {
         "size": max_events,
         "sort": [{fields.timestamp_field: "desc"}],
         "query": {
@@ -138,7 +144,10 @@ def raw_hits(window: TimeWindow, host_ip: str, max_events: int, fields: FieldMap
                 ]
             }
         },
-    })
+    }
+    if fields.drilldown_fields:
+        body["_source"] = list(fields.drilldown_fields)
+    return json.dumps(body)
 
 
 _IPV4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")

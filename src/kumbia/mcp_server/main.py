@@ -95,13 +95,28 @@ def _breakdown_fields(raw: str) -> dict[str, str]:
 # indices, and which fields mean host / DNS name / time, plus any extra
 # fields worth breaking traffic down by. Defaults match Gigamon AMI / ECS.
 network_index_pattern = os.environ.get("NETWORK_ES_INDEX_PATTERN", "*")
+network_host_field = os.environ.get("NETWORK_HOST_FIELD", DEFAULT_FIELD_MAPPING.host_field)
+network_dns_field = os.environ.get("NETWORK_DNS_FIELD", DEFAULT_FIELD_MAPPING.dns_field)
+network_timestamp_field = os.environ.get("NETWORK_TIMESTAMP_FIELD", DEFAULT_FIELD_MAPPING.timestamp_field)
+network_breakdowns = _breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", ""))
+
+# Fields a drilldown fetches per event: the ones named above plus any extras
+# in NETWORK_DRILLDOWN_FIELDS. "*" fetches every field (slow on wide records).
+_drilldown_extra = os.environ.get("NETWORK_DRILLDOWN_FIELDS", "").strip()
+network_drilldown_fields: tuple[str, ...] = () if _drilldown_extra == "*" else tuple(dict.fromkeys([
+    network_timestamp_field, network_host_field, network_dns_field, *network_breakdowns.values(),
+    *filter(None, (name.strip() for name in _drilldown_extra.split(","))),
+]))
+
 network_fields = FieldMapping(
-    host_field=os.environ.get("NETWORK_HOST_FIELD", DEFAULT_FIELD_MAPPING.host_field),
-    dns_field=os.environ.get("NETWORK_DNS_FIELD", DEFAULT_FIELD_MAPPING.dns_field),
-    timestamp_field=os.environ.get("NETWORK_TIMESTAMP_FIELD", DEFAULT_FIELD_MAPPING.timestamp_field),
-    breakdown_fields=_breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", "")),
+    host_field=network_host_field,
+    dns_field=network_dns_field,
+    timestamp_field=network_timestamp_field,
+    breakdown_fields=network_breakdowns,
+    drilldown_fields=network_drilldown_fields,
 )
 network_chat_hours_back = int(os.environ.get("NETWORK_CHAT_HOURS_BACK", "24"))
+network_drilldown_max_events = int(os.environ.get("NETWORK_DRILLDOWN_MAX_EVENTS", "50"))
 
 # optional: enables network_activity_report/drilldown/field_breakdown;
 # registers no-op unless both ES_URL and OPENAI_API_KEY are set — the
@@ -209,6 +224,7 @@ if network_monitoring_pipeline is not None:
             index_pattern=network_index_pattern,
             default_hours_back=network_chat_hours_back,
             on_result=assistant_pipeline.record_lookup,
+            drilldown_max_events=network_drilldown_max_events,
     ):
         assistant_pipeline.add_skill(skill)
 

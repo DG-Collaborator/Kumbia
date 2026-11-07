@@ -34,6 +34,7 @@ from kumbia.rag.question_parsing import hours_from_question, ipv4_from_question
 ResultListener = Callable[[str, str], Awaitable[None]]
 
 _MAX_HOURS_BACK = 720
+_MAX_DRILLDOWN_EVENTS = 200
 
 
 def register_network_activity_tools(
@@ -72,20 +73,21 @@ def register_network_activity_tools(
             host_ip: str,
             question: str,
             hours_back: int = 24,
-            max_events: int = 200,
+            max_events: int = 50,
             index_pattern: str | None = None,
     ) -> str:
         """
            Ask a free-text question grounded in raw network events for one
            specific host (not aggregate counts).
 
-           Fetches a bounded, capped slice of recent events for that host and
-           answers from those real documents. index_pattern scopes which
+           Fetches the most recent max_events events for that host (capped at
+           200) and answers from those real documents. index_pattern scopes which
            indices are searched — leave it unset to use the server's
            configured network index.
         """
         drilldown = await pipeline.drilldown(
-            host_ip, question, _bounded_hours(hours_back), max_events, index_pattern or default_index_pattern,
+            host_ip, question, _bounded_hours(hours_back),
+            max(1, min(int(max_events), _MAX_DRILLDOWN_EVENTS)), index_pattern or default_index_pattern,
         )
         return await _publish("network_activity_drilldown", drilldown.answer)
 
@@ -119,6 +121,7 @@ def network_activity_skills(
         index_pattern: str = "*",
         default_hours_back: int = 24,
         on_result: ResultListener | None = None,
+        drilldown_max_events: int = 50,
 ) -> list[Skill]:
     """
        The pipeline's report, drilldown, and one breakdown per configured
@@ -137,7 +140,9 @@ def network_activity_skills(
         if host_ip is None:
             return "Which host? Include its IP address, e.g. \"what did 203.0.113.5 contact today?\""
         hours = hours_from_question(question, default_hours_back)
-        result = await pipeline.drilldown(host_ip, question, hours_back=hours, index_pattern=index_pattern)
+        result = await pipeline.drilldown(
+            host_ip, question, hours_back=hours, max_events=drilldown_max_events, index_pattern=index_pattern,
+        )
         return await _publish("network_activity_drilldown", result.answer)
 
     def breakdown_runner(alias: str) -> Callable[[str], Awaitable[str]]:

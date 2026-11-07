@@ -53,6 +53,7 @@ from kumbia.core.domain.data_table import DataTable
 from kumbia.core.source.data_source import DataSource
 from kumbia.core.source.source_query import SourceQuery
 from kumbia.rag.clients.llm_client import LlmClient
+from kumbia.rag.embedding import embed_all
 from kumbia.rag.grounding import unsupported_figures, withhold_unsupported
 from kumbia.rag.in_memory_vector_index import InMemoryVectorIndex
 from kumbia.rag.memory_store import append_memory, load_memory_table
@@ -152,9 +153,9 @@ class ConversationPipeline:
         if self._memory_loaded:
             return
         for path in (self._persona.memory_path, self._persona.cache_path):
-            table = load_memory_table(path)
-            for row in table.rows:
-                vector = await self._llm.embed(row.value("text"))
+            rows = load_memory_table(path).rows
+            vectors = await embed_all(self._llm, [row.value("text") for row in rows])
+            for row, vector in zip(rows, vectors):
                 self._memory_index.add(
                     _labeled(row.value("text"), row.value("source"), row.value("created_at")), vector,
                 )

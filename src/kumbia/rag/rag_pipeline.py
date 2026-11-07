@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from kumbia.core.domain.data_table import DataTable
 from kumbia.rag.clients.llm_client import LlmClient
+from kumbia.rag.embedding import embed_all
 from kumbia.rag.grounding import unsupported_figures
 from kumbia.rag.in_memory_vector_index import InMemoryVectorIndex
+
+
+_MAX_ROW_CHARS = 4000  # keeps one very wide row under embedding input limits
 
 
 class RagPipeline:
@@ -26,11 +30,17 @@ class RagPipeline:
            Embeds every row of a DataTable and loads it into the index. Each
            row is rendered as "key: value | key: value ..." so the embedding
            captures both the column names and the values, which makes later
-           retrieval match on meaning rather than raw position.
+           retrieval match on meaning rather than raw position. Rows are
+           embedded concurrently (rag.embedding.embed_all), and empty cells
+           are left out so wide, sparse rows stay short.
         """
-        for row in table.rows:
-            text = " | ".join(f"{column.key}: {row.value(column.key)}" for column in table.columns)
-            vector = await self._llm.embed(text)
+        texts = [
+            " | ".join(
+                f"{column.key}: {row.value(column.key)}" for column in table.columns if row.value(column.key)
+            )[:_MAX_ROW_CHARS]
+            for row in table.rows
+        ]
+        for text, vector in zip(texts, await embed_all(self._llm, texts)):
             self._index.add(text, vector)
 
     async def answer(self, question: str, top_k: int = 4) -> str:
