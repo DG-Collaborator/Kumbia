@@ -12,10 +12,16 @@
    busiest source IPs in its /16, to pick a TELEMETRY_NETWORK_HOST_IP the
    tap actually sees.
 
+   With --recent [N], instead samples the N most recent events (default 500)
+   and lists which fields are actually filled in, most-filled first — the
+   mapping lists every field the index has ever seen, while this shows what
+   current records carry (e.g. which DNS field is populated now).
+
    Usage:
        .venv/bin/python tools/es_probe.py                       # list indices
        .venv/bin/python tools/es_probe.py "logs-gigamon.ami-*"  # fields of a pattern
        .venv/bin/python tools/es_probe.py "logs-gigamon.ami-*" --host 10.20.0.241
+       .venv/bin/python tools/es_probe.py "logs-gigamon.ami-*" --recent
 """
 from __future__ import annotations
 
@@ -54,6 +60,10 @@ def main() -> None:
 
         if len(sys.argv) >= 4 and sys.argv[2] == "--host":
             _probe_host(client, base, pattern, sys.argv[3], timestamp_field)
+            return
+        if len(sys.argv) >= 3 and sys.argv[2] == "--recent":
+            sample = int(sys.argv[3]) if len(sys.argv) >= 4 else 500
+            _probe_recent(client, base, pattern, sample, timestamp_field)
             return
 
         newest = client.post(f"{base}/{pattern}/_search", json={
@@ -120,6 +130,41 @@ def _probe_host(client: httpx.Client, base: str, pattern: str, ip: str, timestam
         print("  none: the tap sees no traffic from this subnet")
     for bucket in buckets:
         print(f"  {bucket['key']}: {bucket['doc_count']} events")
+
+
+def _probe_recent(client: httpx.Client, base: str, pattern: str, sample: int, timestamp_field: str) -> None:
+    response = client.post(f"{base}/{pattern}/_search", json={
+        "size": sample, "sort": [{timestamp_field: "desc"}],
+    })
+    response.raise_for_status()
+    hits = response.json().get("hits", {}).get("hits", [])
+    if not hits:
+        print(f"\nNo events in {pattern}.")
+        return
+    filled: dict[str, int] = {}
+    for hit in hits:
+        for name in _filled_paths(hit.get("_source", {}), ""):
+            filled[name] = filled.get(name, 0) + 1
+    newest = hits[0].get("_source", {}).get(timestamp_field)
+    oldest = hits[-1].get("_source", {}).get(timestamp_field)
+    print(f"\nFields filled in the {len(hits)} most recent events ({oldest} to {newest}):")
+    for name, count in sorted(filled.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {100 * count / len(hits):5.1f}%  {name}")
+
+
+def _filled_paths(value: object, prefix: str) -> set[str]:
+    """Dotted paths of every non-empty leaf in a _source document (names only, values never kept)."""
+    if isinstance(value, dict):
+        paths: set[str] = set()
+        for key, child in value.items():
+            paths |= _filled_paths(child, f"{prefix}{key}.")
+        return paths
+    if isinstance(value, list):
+        paths = set()
+        for child in value:
+            paths |= _filled_paths(child, prefix)
+        return paths
+    return {prefix.rstrip(".")} if value not in (None, "", [], {}) else set()
 
 
 def _flatten(properties: dict, prefix: str, out: dict[str, str]) -> None:

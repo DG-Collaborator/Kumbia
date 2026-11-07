@@ -58,6 +58,7 @@ from kumbia.rag.grounding import unsupported_figures, withhold_unsupported
 from kumbia.rag.in_memory_vector_index import InMemoryVectorIndex
 from kumbia.rag.memory_store import append_memory, load_memory_table
 from kumbia.rag.persona_profile import PersonaProfile
+from kumbia.rag.question_parsing import ipv4s_in
 from kumbia.rag.rag_pipeline import RagPipeline
 
 _NARRATION_INSTRUCTIONS = (
@@ -87,6 +88,8 @@ _GROUNDING_RULES = (
     "host, or measurement that is not in the remembered facts, the conversation, "
     "or the user's message. If you don't have it, say so plainly."
 )
+
+_MAX_TAUGHT_FACTS_SHOWN = 3
 
 _REMEMBER_REQUEST = re.compile(r"^\s*(?:please\s+)?remember(?:\s+that|\s*:)\s+(?P<fact>.+)$", re.IGNORECASE | re.DOTALL)
 
@@ -126,6 +129,7 @@ class ConversationPipeline:
         self._memory_top_k = memory_top_k
         self._memory_loaded = False
         self._skills: dict[str, Skill] = {}
+        self._taught: list[str] = []  # facts the user taught, verbatim, for exact-match recall
 
     def add_skill(self, skill: Skill) -> None:
         """Makes skill reachable from ask(). Registered by the composition layer, never by the LLM."""
@@ -152,6 +156,10 @@ class ConversationPipeline:
         """
         if self._memory_loaded:
             return
+        self._taught = [
+            row.value("text") for row in load_memory_table(self._persona.memory_path).rows
+            if row.value("source") in ("", "user")
+        ]
         for path in (self._persona.memory_path, self._persona.cache_path):
             rows = load_memory_table(path).rows
             vectors = await embed_all(self._llm, [row.value("text") for row in rows])
@@ -168,6 +176,7 @@ class ConversationPipeline:
         """
         await self.ensure_memory_loaded()
         append_memory(self._persona.memory_path, fact, source="user")
+        self._taught.append(fact)
         vector = await self._llm.embed(fact)
         self._memory_index.add(_labeled(fact, "user", _now_iso()), vector)
 
@@ -284,7 +293,9 @@ class ConversationPipeline:
 
         skill, unavailable = await self._route(text)
         if skill is not None:
-            return self._record_turn(text, f"(answered from {skill.name})\n\n{await skill.run(text)}")
+            answer = await skill.run(text)
+            reply = f"(answered from {skill.name})\n\n{answer}{self._taught_facts_note(text, answer)}"
+            return self._record_turn(text, reply)
         if unavailable:
             return self._record_turn(text, self._unavailable_reply())
 
@@ -305,6 +316,22 @@ class ConversationPipeline:
                 )
         return self._record_turn(text, reply)
 
+    def _taught_facts_note(self, question: str, answer: str) -> str:
+        """
+           Facts the user taught that mention an IP address appearing in the
+           question or the data answer — so "what is 10.96.0.10?" routed to a
+           data skill still shows what the user said that address is. Exact
+           matching, no LLM: a fact is shown verbatim or not at all.
+        """
+        addresses = ipv4s_in(question) + ipv4s_in(answer)
+        if not addresses or not self._taught:
+            return ""
+        matches = [fact for fact in self._taught if any(address in ipv4s_in(fact) for address in addresses)]
+        if not matches:
+            return ""
+        shown = "\n".join(f"- {fact}" for fact in matches[-_MAX_TAUGHT_FACTS_SHOWN:])
+        return f"\n\nWhat you've told me:\n{shown}"
+
     def _record_turn(self, text: str, reply: str) -> str:
         self._history.append(Turn("user", text))
         self._history.append(Turn("assistant", reply))
@@ -316,8 +343,8 @@ class ConversationPipeline:
     def _available_data_hint(self) -> str:
         if not self._skills:
             return "No data sources are connected right now."
-        listed = "\n".join(f"- {skill.name}: {skill.description}" for skill in self._skills.values())
-        return f"I can answer from:\n{listed}"
+        listed = ", ".join(name.replace("_", " ") for name in self._skills)
+        return f"I can answer from: {listed}."
 
     async def _route(self, text: str) -> tuple[Skill | None, bool]:
         """

@@ -25,8 +25,13 @@ class FieldMapping:
        Wide enriched records can carry hundreds of fields; fetching only the
        ones worth reasoning about keeps each event small to embed. Empty
        means every field (the index's whole _source).
+
+       dest_field is the other end of a connection from host_field; host
+       profiles use it for "who did this host talk to" and "who talked to
+       this host".
     """
     host_field: str = "host.ip"
+    dest_field: str = "destination.ip"
     dns_field: str = "gigamon.ami.dns_name"
     timestamp_field: str = "@timestamp"
     breakdown_fields: dict[str, str] = field(default_factory=dict)
@@ -56,7 +61,7 @@ def search_url(elasticsearch_base_url: str, index_pattern: str) -> str:
 
 
 def top_talkers(window: TimeWindow, top_n: int, fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
-    """Top source IPs by doc_count, with a per-host unique-DNS-name count nested in."""
+    """Top source IPs by doc_count, with per-host distinct DNS-name and destination counts nested in."""
     return json.dumps({
         "size": 0,
         "query": {"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}},
@@ -64,10 +69,36 @@ def top_talkers(window: TimeWindow, top_n: int, fields: FieldMapping = DEFAULT_F
             "top_hosts": {
                 "terms": {"field": fields.host_field, "size": top_n},
                 "aggs": {
-                    "unique_dns_names": {"cardinality": {"field": fields.dns_field}}
+                    "unique_dns_names": {"cardinality": {"field": fields.dns_field}},
+                    "unique_destinations": {"cardinality": {"field": fields.dest_field}},
                 },
             }
         },
+    })
+
+
+def event_count(window: TimeWindow, fields: FieldMapping = DEFAULT_FIELD_MAPPING,
+                filter_field: str | None = None, filter_value: str | None = None,
+                present_field: str | None = None) -> str:
+    """
+       Events in the window, optionally only those where filter_field equals
+       filter_value and/or present_field has a value. One "events" cell.
+    """
+    return json.dumps({
+        "size": 0,
+        "query": _window_query(window, fields, filter_field, filter_value, present_field),
+        "aggs": {"events": {"value_count": {"field": fields.timestamp_field}}},
+    })
+
+
+def host_terms(window: TimeWindow, filter_field: str, host_ip: str, agg_field: str, top_n: int,
+               fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Top values of agg_field among the window's events where filter_field is host_ip."""
+    _require_ip(host_ip)
+    return json.dumps({
+        "size": 0,
+        "query": _window_query(window, fields, filter_field, host_ip),
+        "aggs": {"values": {"terms": {"field": agg_field, "size": top_n}}},
     })
 
 
@@ -130,8 +161,7 @@ def raw_hits(window: TimeWindow, host_ip: str, max_events: int, fields: FieldMap
        Raw hit slice for one host. Grounds a free-text question in the actual
        events instead of the aggregate counts.
     """
-    if not _is_ip_literal(host_ip):
-        raise ValueError(f"host_ip must be a plain IPv4/IPv6 address, got: {host_ip!r}")
+    _require_ip(host_ip)
 
     body: dict = {
         "size": max_events,
@@ -148,6 +178,21 @@ def raw_hits(window: TimeWindow, host_ip: str, max_events: int, fields: FieldMap
     if fields.drilldown_fields:
         body["_source"] = list(fields.drilldown_fields)
     return json.dumps(body)
+
+
+def _window_query(window: TimeWindow, fields: FieldMapping, filter_field: str | None = None,
+                  filter_value: str | None = None, present_field: str | None = None) -> dict:
+    clauses: list[dict] = [{"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}}]
+    if filter_field is not None and filter_value is not None:
+        clauses.append({"term": {filter_field: filter_value}})
+    if present_field is not None:
+        clauses.append({"exists": {"field": present_field}})
+    return {"bool": {"filter": clauses}}
+
+
+def _require_ip(host_ip: str) -> None:
+    if not _is_ip_literal(host_ip):
+        raise ValueError(f"host_ip must be a plain IPv4/IPv6 address, got: {host_ip!r}")
 
 
 _IPV4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")

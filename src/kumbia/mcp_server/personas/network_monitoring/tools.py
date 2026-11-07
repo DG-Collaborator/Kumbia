@@ -66,27 +66,28 @@ def register_network_activity_tools(
         report = await pipeline.run(
             _bounded_hours(hours_back), top_n, question, index_pattern or default_index_pattern,
         )
-        return await _publish("network_activity_report", to_text(report))
+        return await _publish("network_activity_report", to_text(report, pipeline.host_labels))
 
     @mcp.tool()
     async def network_activity_drilldown(
             host_ip: str,
             question: str,
             hours_back: int = 24,
-            max_events: int = 50,
+            max_events: int = 20,
             index_pattern: str | None = None,
     ) -> str:
         """
-           Ask a free-text question grounded in raw network events for one
-           specific host (not aggregate counts).
-
-           Fetches the most recent max_events events for that host (capped at
-           200) and answers from those real documents. index_pattern scopes which
-           indices are searched — leave it unset to use the server's
-           configured network index.
+           Profile one host over a trailing window and answer a question
+           about it: events it sent and received, its top destinations, the
+           top sources that sent to it, and its top value for each configured
+           breakdown field — all computed by aggregations — plus its
+           max_events most recent events (capped at 200) as extra evidence.
+           host_ip may also be a configured host name (e.g. a service name).
+           index_pattern scopes which indices are searched — leave it unset to
+           use the server's configured network index.
         """
         drilldown = await pipeline.drilldown(
-            host_ip, question, _bounded_hours(hours_back),
+            pipeline.host_aliases.get(host_ip, host_ip), question, _bounded_hours(hours_back),
             max(1, min(int(max_events), _MAX_DRILLDOWN_EVENTS)), index_pattern or default_index_pattern,
         )
         return await _publish("network_activity_drilldown", drilldown.answer)
@@ -121,7 +122,7 @@ def network_activity_skills(
         index_pattern: str = "*",
         default_hours_back: int = 24,
         on_result: ResultListener | None = None,
-        drilldown_max_events: int = 50,
+        drilldown_max_events: int = 20,
 ) -> list[Skill]:
     """
        The pipeline's report, drilldown, and one breakdown per configured
@@ -133,12 +134,13 @@ def network_activity_skills(
     async def report(question: str) -> str:
         hours = hours_from_question(question, default_hours_back)
         result = await pipeline.run(hours_back=hours, question=question, index_pattern=index_pattern)
-        return await _publish("network_activity_report", to_text(result))
+        return await _publish("network_activity_report", to_text(result, pipeline.host_labels))
 
     async def drilldown(question: str) -> str:
-        host_ip = ipv4_from_question(question)
+        host_ip = ipv4_from_question(question, pipeline.host_aliases)
         if host_ip is None:
-            return "Which host? Include its IP address, e.g. \"what did 203.0.113.5 contact today?\""
+            named = f" or one of its names ({', '.join(sorted(pipeline.host_aliases))})" if pipeline.host_aliases else ""
+            return f"Which host? Include its IP address{named}."
         hours = hours_from_question(question, default_hours_back)
         result = await pipeline.drilldown(
             host_ip, question, hours_back=hours, max_events=drilldown_max_events, index_pattern=index_pattern,
@@ -161,8 +163,9 @@ def network_activity_skills(
         ),
         Skill(
             name="network_activity_drilldown",
-            description="questions about one specific host named by its IP address: what it contacted, "
-                        "which DNS names, its recent events, anything unusual about it.",
+            description="questions about one specific host named by its IP address"
+                        + (f" or by name ({', '.join(sorted(pipeline.host_aliases))})" if pipeline.host_aliases else "")
+                        + ": what it is, who it talked to, who talked to it, its apps and ports, anything unusual.",
             run=drilldown,
         ),
     ]

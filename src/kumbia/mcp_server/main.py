@@ -91,11 +91,24 @@ def _breakdown_fields(raw: str) -> dict[str, str]:
     return fields
 
 
+def _host_aliases(raw: str) -> dict[str, str]:
+    """NETWORK_HOST_ALIASES: "name=ip,name=ip" -> {name: ip}, e.g. Kubernetes service ClusterIPs."""
+    aliases: dict[str, str] = {}
+    for pair in filter(None, (part.strip() for part in raw.split(","))):
+        name, sep, ip = pair.partition("=")
+        name, ip = name.strip(), ip.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z0-9._-]+", name) or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", ip):
+            raise ValueError(f"NETWORK_HOST_ALIASES entries must look like name=10.0.0.1, got: {pair!r}")
+        aliases[name] = ip
+    return aliases
+
+
 # network_monitoring's view of the real (enriched) network data: which
 # indices, and which fields mean host / DNS name / time, plus any extra
 # fields worth breaking traffic down by. Defaults match Gigamon AMI / ECS.
 network_index_pattern = os.environ.get("NETWORK_ES_INDEX_PATTERN", "*")
 network_host_field = os.environ.get("NETWORK_HOST_FIELD", DEFAULT_FIELD_MAPPING.host_field)
+network_dest_field = os.environ.get("NETWORK_DEST_FIELD", DEFAULT_FIELD_MAPPING.dest_field)
 network_dns_field = os.environ.get("NETWORK_DNS_FIELD", DEFAULT_FIELD_MAPPING.dns_field)
 network_timestamp_field = os.environ.get("NETWORK_TIMESTAMP_FIELD", DEFAULT_FIELD_MAPPING.timestamp_field)
 network_breakdowns = _breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", ""))
@@ -104,19 +117,22 @@ network_breakdowns = _breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS"
 # in NETWORK_DRILLDOWN_FIELDS. "*" fetches every field (slow on wide records).
 _drilldown_extra = os.environ.get("NETWORK_DRILLDOWN_FIELDS", "").strip()
 network_drilldown_fields: tuple[str, ...] = () if _drilldown_extra == "*" else tuple(dict.fromkeys([
-    network_timestamp_field, network_host_field, network_dns_field, *network_breakdowns.values(),
+    network_timestamp_field, network_host_field, network_dest_field, network_dns_field,
+    *network_breakdowns.values(),
     *filter(None, (name.strip() for name in _drilldown_extra.split(","))),
 ]))
 
 network_fields = FieldMapping(
     host_field=network_host_field,
+    dest_field=network_dest_field,
     dns_field=network_dns_field,
     timestamp_field=network_timestamp_field,
     breakdown_fields=network_breakdowns,
     drilldown_fields=network_drilldown_fields,
 )
 network_chat_hours_back = int(os.environ.get("NETWORK_CHAT_HOURS_BACK", "24"))
-network_drilldown_max_events = int(os.environ.get("NETWORK_DRILLDOWN_MAX_EVENTS", "50"))
+network_drilldown_max_events = int(os.environ.get("NETWORK_DRILLDOWN_MAX_EVENTS", "20"))
+network_host_aliases = _host_aliases(os.environ.get("NETWORK_HOST_ALIASES", ""))
 
 # optional: enables network_activity_report/drilldown/field_breakdown;
 # registers no-op unless both ES_URL and OPENAI_API_KEY are set — the
@@ -131,6 +147,7 @@ if elasticsearch_url and openai_api_key:
         credentials=elasticsearch_credentials,
         llm=OpenAiClient(http_client, api_key=openai_api_key),
         fields=network_fields,
+        host_aliases=network_host_aliases,
     )
 
 

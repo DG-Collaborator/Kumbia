@@ -1,8 +1,9 @@
 """
    Deterministic extraction of query parameters from a free-text question —
-   the time window it asks about and an IPv4 address it names. Shared by any
-   skill whose fixed query needs a window or a host: the regex reads the
-   user's words, the LLM never does, so a parameter can't be invented.
+   the time window it asks about and an IPv4 address it names (directly, or
+   by a configured name such as a service's). Shared by any skill whose fixed
+   query needs a window or a host: the regex reads the user's words, the LLM
+   never does, so a parameter can't be invented.
 """
 from __future__ import annotations
 
@@ -53,15 +54,34 @@ def hours_from_question(question: str, default: int) -> int:
     return _clamp(default)
 
 
-def ipv4_from_question(question: str) -> str | None:
-    """The first valid IPv4 address the question names, or None."""
-    for candidate in _IPV4_IN_TEXT.findall(question):
+def ipv4_from_question(question: str, aliases: dict[str, str] | None = None) -> str | None:
+    """
+       The first valid IPv4 address the question names, or None. When it
+       names none literally, a name from aliases ({name: ip}) counts too,
+       matched as a whole word (so "orders" doesn't match inside
+       "orders-postgresql"), longest names first.
+    """
+    found = ipv4s_in(question)
+    if found:
+        return found[0]
+    lowered = question.lower()
+    for name in sorted(aliases or {}, key=len, reverse=True):
+        if re.search(rf"(?<![\w-]){re.escape(name.lower())}(?![\w-])", lowered):
+            return aliases[name]
+    return None
+
+
+def ipv4s_in(text: str) -> list[str]:
+    """Every valid IPv4 address in text, in order, without duplicates."""
+    found: list[str] = []
+    for candidate in _IPV4_IN_TEXT.findall(text):
         try:
             ipaddress.IPv4Address(candidate)
         except ValueError:
             continue
-        return candidate
-    return None
+        if candidate not in found:
+            found.append(candidate)
+    return found
 
 
 def _unit_hours(unit: str) -> float:

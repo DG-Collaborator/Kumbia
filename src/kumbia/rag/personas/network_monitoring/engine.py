@@ -16,6 +16,7 @@ class TopTalker:
     host_ip: str
     doc_count: int
     unique_dns_names: int
+    unique_destinations: int = 0
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ def top_talkers(table: DataTable) -> list[TopTalker]:
             host_ip=row.value("key"),
             doc_count=_to_int(row.value("doc_count")),
             unique_dns_names=_to_int(row.value("unique_dns_names")),
+            unique_destinations=_to_int(row.value("unique_destinations")),
         )
         for row in table.rows
     ]
@@ -112,17 +114,40 @@ def summarize(top_talkers_table: DataTable, volume_table: DataTable, interval: s
 
 
 def field_breakdown(alias: str, field_name: str, values_table: DataTable, distinct_table: DataTable) -> FieldBreakdown:
-    values = [
-        FieldValue(value=row.value("key"), doc_count=_to_int(row.value("doc_count")))
-        for row in values_table.rows
-    ]
-    distinct = _to_int(distinct_table.rows[0].value("distinct")) if distinct_table.rows else len(values)
+    values = field_values(values_table)
+    distinct = single_count(distinct_table, "distinct") if distinct_table.rows else len(values)
     return FieldBreakdown(
         alias=alias,
         field_name=field_name,
         distinct_count=distinct,
-        values=sorted(values, key=lambda v: v.doc_count, reverse=True),
+        values=values,
     )
+
+
+@dataclass(frozen=True)
+class HostProfile:
+    """
+       One host's traffic in a window, from both ends: what it sent (as
+       source) and what it received (as destination), plus the top values
+       of each configured breakdown among the events it sent.
+    """
+    host_ip: str
+    events_as_source: int
+    events_as_destination: int
+    top_destinations: list[FieldValue]
+    top_sources: list[FieldValue]
+    breakdowns: dict[str, list[FieldValue]]
+
+
+def field_values(table: DataTable) -> list[FieldValue]:
+    """A terms aggregation's buckets as (value, count), most frequent first."""
+    values = [FieldValue(value=row.value("key"), doc_count=_to_int(row.value("doc_count"))) for row in table.rows]
+    return sorted(values, key=lambda v: v.doc_count, reverse=True)
+
+
+def single_count(table: DataTable, column: str = "events") -> int:
+    """The value of a single-row, non-bucket aggregation (value_count, cardinality)."""
+    return _to_int(table.rows[0].value(column)) if table.rows else 0
 
 
 def newest_event(latest_table: DataTable) -> str | None:
