@@ -25,4 +25,6 @@ Kumbia.iml
 # Data folder left in because I don't think it matters at this point. Remove comment if so.
 # /data
 # Editor-based HTTP Client requests
-/httpRequests/data/assistant/cache.jsonl
+/httpRequests/
+data/assistant/cache.jsonl
+
