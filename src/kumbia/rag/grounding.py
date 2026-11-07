@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 
 _IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
+_GROUPED_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 _NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?%?")
 
 # Bare integers this small are almost always counting words, list markers, or
@@ -67,13 +68,17 @@ def withhold_unsupported(narration: str, figures: str, question: str) -> str:
 
 
 def _numbers_in(text: str) -> set[float]:
-    """Every number in text, plus its parts: a timestamp's year, month, hour, etc. each count on their own."""
+    """
+       Every number in text, plus its parts: a timestamp's year, month, hour,
+       etc. each count on their own. A thousands-grouped number (48,211,930)
+       is never split into parts, so "48 MB" can't borrow its leading group.
+    """
     values: set[float] = set()
     for raw in _NUMBER.findall(text):
         value = _to_float(raw.rstrip(",%"))
         if value is not None:
             values.add(abs(value))
-    for raw in re.findall(r"\d+(?:\.\d+)?", text):
+    for raw in re.findall(r"\d+(?:\.\d+)?", _GROUPED_NUMBER.sub(" ", text)):
         values.add(float(raw))
     return values
 

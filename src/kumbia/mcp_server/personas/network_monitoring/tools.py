@@ -1,6 +1,6 @@
 """
    Network Monitoring persona: registers network_activity_report,
-   network_activity_drilldown, and network_field_breakdown, backed by
+   network_activity_drilldown, network_field_breakdown, and network_metric, backed by
    NetworkActivityPipeline. Tool bodies stay thin — all business logic lives
    in the pipeline; this file only adapts MCP's arguments/return shape to the
    pipeline's own method signatures.
@@ -27,6 +27,7 @@ from kumbia.rag.conversation_pipeline import Skill
 from kumbia.rag.personas.network_monitoring.pipeline import (
     NetworkActivityPipeline,
     field_report_text,
+    metric_report_text,
     to_text,
 )
 from kumbia.rag.question_parsing import hours_from_question, ipv4_from_question
@@ -116,6 +117,31 @@ def register_network_activity_tools(
             return str(error)
         return await _publish(f"network_breakdown_{field_alias}", field_report_text(report))
 
+    @mcp.tool()
+    async def network_metric(
+            metric_alias: str,
+            hours_back: int = 24,
+            question: str | None = None,
+            top_n: int = 5,
+            index_pattern: str | None = None,
+    ) -> str:
+        """
+           Report on one configured numeric network metric (for example bytes,
+           packets, or round-trip time) over a trailing window: count, total,
+           average, minimum, maximum, and 95th percentile; the hosts with the
+           highest total and highest average; and the busiest and
+           highest/lowest-average time buckets — plus a narrative grounded in
+           those figures. metric_alias must be one of the server's configured
+           metric aliases; an unknown alias returns the list of valid ones.
+        """
+        try:
+            report = await pipeline.metric(
+                metric_alias, _bounded_hours(hours_back), question, top_n, index_pattern or default_index_pattern,
+            )
+        except ValueError as error:
+            return str(error)
+        return await _publish(f"network_metric_{metric_alias}", metric_report_text(report))
+
 
 def network_activity_skills(
         pipeline: NetworkActivityPipeline,
@@ -154,11 +180,19 @@ def network_activity_skills(
             return await _publish(f"network_breakdown_{alias}", field_report_text(result))
         return run
 
+    def metric_runner(alias: str) -> Callable[[str], Awaitable[str]]:
+        async def run(question: str) -> str:
+            hours = hours_from_question(question, default_hours_back)
+            result = await pipeline.metric(alias, hours_back=hours, question=question, index_pattern=index_pattern)
+            return await _publish(f"network_metric_{alias}", metric_report_text(result))
+        return run
+
     skills = [
         Skill(
             name="network_activity_report",
-            description="network traffic across all hosts over a time window: total events, top talkers "
-                        "(busiest source IPs), distinct DNS names per host, volume over time, spikes.",
+            description="network traffic across all hosts over a time window: number of connection "
+                        "records, top talkers (busiest source IPs), distinct destinations per host, "
+                        "volume over time, spikes.",
             run=report,
         ),
         Skill(
@@ -175,6 +209,13 @@ def network_activity_skills(
             description=f"network events broken down by {alias} ({field_name}): which {alias} values are "
                         f"most common, how many distinct ones, what stands out.",
             run=breakdown_runner(alias),
+        ))
+    for alias, field_name in pipeline.metric_fields.items():
+        skills.append(Skill(
+            name=f"network_metric_{alias}",
+            description=f"the {alias} metric ({field_name}): total, average, min, max, 95th percentile, "
+                        f"which hosts have the most or highest {alias}, and when it peaked.",
+            run=metric_runner(alias),
         ))
     return skills
 

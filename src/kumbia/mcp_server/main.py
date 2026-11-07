@@ -79,14 +79,14 @@ prometheus_credentials = (
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 
 
-def _breakdown_fields(raw: str) -> dict[str, str]:
-    """NETWORK_BREAKDOWN_FIELDS: "alias=field,alias=field" -> {alias: field}. Aliases become skill/tool names."""
+def _alias_fields(raw: str, setting: str) -> dict[str, str]:
+    """"alias=field,alias=field" -> {alias: field}, for NETWORK_BREAKDOWN_FIELDS / NETWORK_METRIC_FIELDS. Aliases become skill/tool names."""
     fields: dict[str, str] = {}
     for pair in filter(None, (part.strip() for part in raw.split(","))):
         alias, sep, field_name = pair.partition("=")
         alias, field_name = alias.strip().lower(), field_name.strip()
         if not sep or not field_name or not re.fullmatch(r"[a-z0-9_]+", alias):
-            raise ValueError(f"NETWORK_BREAKDOWN_FIELDS entries must look like alias=field.name, got: {pair!r}")
+            raise ValueError(f"{setting} entries must look like alias=field.name, got: {pair!r}")
         fields[alias] = field_name
     return fields
 
@@ -111,7 +111,8 @@ network_host_field = os.environ.get("NETWORK_HOST_FIELD", DEFAULT_FIELD_MAPPING.
 network_dest_field = os.environ.get("NETWORK_DEST_FIELD", DEFAULT_FIELD_MAPPING.dest_field)
 network_dns_field = os.environ.get("NETWORK_DNS_FIELD", DEFAULT_FIELD_MAPPING.dns_field)
 network_timestamp_field = os.environ.get("NETWORK_TIMESTAMP_FIELD", DEFAULT_FIELD_MAPPING.timestamp_field)
-network_breakdowns = _breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", ""))
+network_breakdowns = _alias_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", ""), "NETWORK_BREAKDOWN_FIELDS")
+network_metrics = _alias_fields(os.environ.get("NETWORK_METRIC_FIELDS", ""), "NETWORK_METRIC_FIELDS")
 
 # Fields a drilldown fetches per event: the ones named above plus any extras
 # in NETWORK_DRILLDOWN_FIELDS. "*" fetches every field (slow on wide records).
@@ -129,6 +130,7 @@ network_fields = FieldMapping(
     timestamp_field=network_timestamp_field,
     breakdown_fields=network_breakdowns,
     drilldown_fields=network_drilldown_fields,
+    metric_fields=network_metrics,
 )
 network_chat_hours_back = int(os.environ.get("NETWORK_CHAT_HOURS_BACK", "24"))
 network_drilldown_max_events = int(os.environ.get("NETWORK_DRILLDOWN_MAX_EVENTS", "20"))

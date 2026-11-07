@@ -29,6 +29,12 @@ class FieldMapping:
        dest_field is the other end of a connection from host_field; host
        profiles use it for "who did this host talk to" and "who talked to
        this host".
+
+       A "connection record" is any event with a host_field value; volume,
+       totals, and spikes count only those, since enriched sources also emit
+       records that aren't traffic (status/heartbeat events, DNS records
+       without a source address). metric_fields maps an alias to a numeric
+       field (bytes, packets, round-trip time, ...) for the metrics skill.
     """
     host_field: str = "host.ip"
     dest_field: str = "destination.ip"
@@ -36,6 +42,7 @@ class FieldMapping:
     timestamp_field: str = "@timestamp"
     breakdown_fields: dict[str, str] = field(default_factory=dict)
     drilldown_fields: tuple[str, ...] = ()
+    metric_fields: dict[str, str] = field(default_factory=dict)
 
     def breakdowns(self) -> dict[str, str]:
         return dict(self.breakdown_fields) or {"dns": self.dns_field}
@@ -117,13 +124,67 @@ def bucket_interval(hours_back: int) -> str:
 def volume_over_time(
         window: TimeWindow, fields: FieldMapping = DEFAULT_FIELD_MAPPING, interval: str = "1h",
 ) -> str:
-    """Doc-count volume per interval across the window, for spotting spikes/lulls."""
+    """Connection-record volume per interval across the window, for spotting spikes/lulls."""
     return json.dumps({
         "size": 0,
-        "query": {"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}},
+        "query": _window_query(window, fields, present_field=fields.host_field),
         "aggs": {
             "over_time": {
                 "date_histogram": {"field": fields.timestamp_field, "fixed_interval": interval}
+            }
+        },
+    })
+
+
+def metric_stats(window: TimeWindow, metric_field: str, fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Count/sum/avg/min/max and 95th percentile of one numeric field across the window."""
+    return json.dumps({
+        "size": 0,
+        "query": _window_query(window, fields, present_field=metric_field),
+        "aggs": {
+            "n": {"value_count": {"field": metric_field}},
+            "total": {"sum": {"field": metric_field}},
+            "mean": {"avg": {"field": metric_field}},
+            "low": {"min": {"field": metric_field}},
+            "high": {"max": {"field": metric_field}},
+            "p95": {"percentiles": {"field": metric_field, "percents": [95]}},
+        },
+    })
+
+
+def metric_top_hosts(window: TimeWindow, metric_field: str, top_n: int, order_by: str,
+                     fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Hosts ranked by the metric's total ("total") or average ("mean"), with both per host."""
+    if order_by not in ("total", "mean"):
+        raise ValueError(f"order_by must be 'total' or 'mean', got: {order_by!r}")
+    return json.dumps({
+        "size": 0,
+        "query": _window_query(window, fields, present_field=metric_field),
+        "aggs": {
+            "hosts": {
+                "terms": {"field": fields.host_field, "size": top_n, "order": {order_by: "desc"}},
+                "aggs": {
+                    "total": {"sum": {"field": metric_field}},
+                    "mean": {"avg": {"field": metric_field}},
+                },
+            }
+        },
+    })
+
+
+def metric_over_time(window: TimeWindow, metric_field: str, interval: str,
+                     fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """The metric's total and average per time bucket across the window."""
+    return json.dumps({
+        "size": 0,
+        "query": _window_query(window, fields, present_field=metric_field),
+        "aggs": {
+            "over_time": {
+                "date_histogram": {"field": fields.timestamp_field, "fixed_interval": interval},
+                "aggs": {
+                    "total": {"sum": {"field": metric_field}},
+                    "mean": {"avg": {"field": metric_field}},
+                },
             }
         },
     })

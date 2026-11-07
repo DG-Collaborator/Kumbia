@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from statistics import mean, pstdev
@@ -34,6 +35,7 @@ class Summary:
     anomalies: list[VolumeBucket] = field(default_factory=list)
     interval: str = "1h"
     newest_event: str | None = None  # only looked up when the window is empty
+    other_record_count: int = 0  # records in the window that aren't connections (no host field)
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,98 @@ def single_count(table: DataTable, column: str = "events") -> int:
     return _to_int(table.rows[0].value(column)) if table.rows else 0
 
 
+@dataclass(frozen=True)
+class MetricStats:
+    count: int
+    total: float | None
+    mean: float | None
+    low: float | None
+    high: float | None
+    p95: float | None
+
+
+@dataclass(frozen=True)
+class MetricHost:
+    host_ip: str
+    records: int
+    total: float | None
+    mean: float | None
+
+
+@dataclass(frozen=True)
+class MetricBucket:
+    timestamp: str
+    records: int
+    total: float | None
+    mean: float | None
+
+
+@dataclass(frozen=True)
+class MetricReport:
+    alias: str
+    field_name: str
+    interval: str
+    stats: MetricStats
+    top_by_total: list[MetricHost]
+    top_by_mean: list[MetricHost]
+    buckets: list[MetricBucket]
+
+    @property
+    def peak_total_bucket(self) -> MetricBucket | None:
+        return max((b for b in self.buckets if b.total is not None), key=lambda b: b.total, default=None)
+
+    @property
+    def peak_mean_bucket(self) -> MetricBucket | None:
+        return max((b for b in self.buckets if b.mean is not None), key=lambda b: b.mean, default=None)
+
+    @property
+    def low_mean_bucket(self) -> MetricBucket | None:
+        return min((b for b in self.buckets if b.mean is not None), key=lambda b: b.mean, default=None)
+
+
+def metric_stats(table: DataTable) -> MetricStats:
+    """The single-row stats aggregation; the percentiles cell arrives as JSON ({"values": {"95.0": x}})."""
+    row = table.rows[0] if table.rows else None
+    cell = (lambda name: row.value(name) if row is not None else "")
+    p95 = None
+    try:
+        p95 = _to_float(next(iter(json.loads(cell("p95")).get("values", {}).values()), None))
+    except (ValueError, TypeError, AttributeError):
+        p95 = None
+    return MetricStats(
+        count=_to_int(cell("n")),
+        total=_to_float(cell("total")),
+        mean=_to_float(cell("mean")),
+        low=_to_float(cell("low")),
+        high=_to_float(cell("high")),
+        p95=p95,
+    )
+
+
+def metric_hosts(table: DataTable) -> list[MetricHost]:
+    return [
+        MetricHost(
+            host_ip=row.value("key"),
+            records=_to_int(row.value("doc_count")),
+            total=_to_float(row.value("total")),
+            mean=_to_float(row.value("mean")),
+        )
+        for row in table.rows
+    ]
+
+
+def metric_buckets(table: DataTable) -> list[MetricBucket]:
+    return [
+        MetricBucket(
+            timestamp=_epoch_millis_to_iso(_to_int(row.value("key"))),
+            records=_to_int(row.value("doc_count")),
+            total=_to_float(row.value("total")) if _to_int(row.value("doc_count")) else None,
+            mean=_to_float(row.value("mean")),
+        )
+        for row in table.rows
+    ]
+
+
 def newest_event(latest_table: DataTable) -> str | None:
     """The max-timestamp aggregation's value (epoch millis) as ISO, or None if the scope has no events."""
     if not latest_table.rows:
@@ -170,6 +264,14 @@ def _to_int(value: str) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _to_float(value: object) -> float | None:
+    """A pre-stringified metric cell as a float; '' / 'None' / non-numeric (an empty window's avg) -> None."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _epoch_millis_to_iso(epoch_millis: int) -> str:
