@@ -321,7 +321,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
         </form>
         <form class="action" id="network-form" data-tool="network_activity_report">
           <label class="label" for="network-hours">Network activity report (hours back)</label>
-          <div class="field"><input class="narrow" id="network-hours" type="number" min="1" max="168" value="2"><button class="btn" type="submit">Run report</button></div>
+          <div class="field"><input class="narrow" id="network-hours" type="number" min="1" max="720" value="24"><button class="btn" type="submit">Run report</button></div>
         </form>
         <form class="action" id="power-form" data-tool="power_telemetry_report">
           <span class="label">Raw power readings</span>
@@ -471,7 +471,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     await runTool({ userText: "Search the web: " + query, tool: "web_search", path: "/api/web-search", body: { query }, pendingText: "Searching…" });
   });
   bindForm("network-form", async () => {
-    const hours = Number($("network-hours").value) || 2;
+    const hours = Number($("network-hours").value) || 24;
     await runTool({ userText: `Network activity report, last ${hours} hour(s)`, tool: "network_activity_report", path: "/api/network-report", body: { hours_back: hours }, pendingText: "Running report…" });
   });
   bindForm("power-form", async () => {

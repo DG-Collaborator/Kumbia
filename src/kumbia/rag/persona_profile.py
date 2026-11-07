@@ -13,6 +13,12 @@
     even if they happen to share a process. memory_path/cache_path are kept
     separate per persona for the same reason: no persona's remembered facts or
     cached lookups are reachable from another persona's pipeline instance.
+
+    strict_grounding (default on) makes a free-form chat reply that states a
+    figure not found in the persona's evidence (remembered facts, turn
+    history, the user's own message) get withheld instead of returned. Turn it
+    off only for a persona meant to answer general-knowledge questions from
+    the model's own training data.
 """
 from __future__ import annotations
 
@@ -30,3 +36,4 @@ class PersonaProfile:
     rag_namespace: str
     memory_path: Path
     cache_path: Path
+    strict_grounding: bool = True

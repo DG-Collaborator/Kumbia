@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,6 +29,7 @@ from kumbia.mcp_server.personas.assistant.tools import (
     register_web_search_tool,
 )
 from kumbia.mcp_server.personas.network_monitoring.tools import (
+    network_activity_skills,
     register_network_activity_prompts,
     register_network_activity_resources,
     register_network_activity_tools,
@@ -38,6 +40,7 @@ from kumbia.rag.clients.openai_client import OpenAiClient
 from kumbia.rag.conversation_pipeline import ConversationPipeline
 from kumbia.rag.persona_profile import PersonaProfile
 from kumbia.rag.personas.network_monitoring.pipeline import NetworkActivityPipeline
+from kumbia.rag.personas.network_monitoring.queries import DEFAULT_FIELD_MAPPING, FieldMapping
 from kumbia.telemetry.asset_registry import AssetRegistry
 from kumbia.telemetry.collector import TelemetryCollector
 from kumbia.telemetry.correlation_engine import SourceMapping
@@ -75,19 +78,45 @@ prometheus_credentials = (
 
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 
-# optional: enables network_activity_report/drilldown; registers no-op unless
-# both ES_URL and OPENAI_API_KEY are set — the persona is useless without an
-# LLM, so there's no value in exposing tools that are guaranteed to fail.
+
+def _breakdown_fields(raw: str) -> dict[str, str]:
+    """NETWORK_BREAKDOWN_FIELDS: "alias=field,alias=field" -> {alias: field}. Aliases become skill/tool names."""
+    fields: dict[str, str] = {}
+    for pair in filter(None, (part.strip() for part in raw.split(","))):
+        alias, sep, field_name = pair.partition("=")
+        alias, field_name = alias.strip().lower(), field_name.strip()
+        if not sep or not field_name or not re.fullmatch(r"[a-z0-9_]+", alias):
+            raise ValueError(f"NETWORK_BREAKDOWN_FIELDS entries must look like alias=field.name, got: {pair!r}")
+        fields[alias] = field_name
+    return fields
+
+
+# network_monitoring's view of the real (enriched) network data: which
+# indices, and which fields mean host / DNS name / time, plus any extra
+# fields worth breaking traffic down by. Defaults match Gigamon AMI / ECS.
+network_index_pattern = os.environ.get("NETWORK_ES_INDEX_PATTERN", "*")
+network_fields = FieldMapping(
+    host_field=os.environ.get("NETWORK_HOST_FIELD", DEFAULT_FIELD_MAPPING.host_field),
+    dns_field=os.environ.get("NETWORK_DNS_FIELD", DEFAULT_FIELD_MAPPING.dns_field),
+    timestamp_field=os.environ.get("NETWORK_TIMESTAMP_FIELD", DEFAULT_FIELD_MAPPING.timestamp_field),
+    breakdown_fields=_breakdown_fields(os.environ.get("NETWORK_BREAKDOWN_FIELDS", "")),
+)
+network_chat_hours_back = int(os.environ.get("NETWORK_CHAT_HOURS_BACK", "24"))
+
+# optional: enables network_activity_report/drilldown/field_breakdown;
+# registers no-op unless both ES_URL and OPENAI_API_KEY are set — the
+# persona is useless without an LLM, so there's no value in exposing tools
+# that are guaranteed to fail. Tools are registered further down, once the
+# assistant exists, so their answers can be fed into its memory.
+network_monitoring_pipeline: NetworkActivityPipeline | None = None
 if elasticsearch_url and openai_api_key:
     network_monitoring_pipeline = NetworkActivityPipeline(
         data_source=ElasticsearchDataSource(http_client),
         source_address=elasticsearch_url,
         credentials=elasticsearch_credentials,
         llm=OpenAiClient(http_client, api_key=openai_api_key),
+        fields=network_fields,
     )
-    register_network_activity_tools(mcp, network_monitoring_pipeline)
-    register_network_activity_resources(mcp, network_monitoring_pipeline)
-    register_network_activity_prompts(mcp)
 
 
 # --- assistant persona -------------------------------------------------
@@ -99,10 +128,12 @@ if elasticsearch_url and openai_api_key:
 ASSISTANT_SYSTEM_PROMPT = (
     "You are Kumbia's assistant persona, a helpful conversational assistant. "
     "Keep answers short and conversational, since they may be spoken aloud. "
-    "The remembered facts below are current and correct, even if they mention "
-    "dates or events after your training data ends — trust them completely "
-    "and state the answer directly. Never say you don't have up-to-date "
-    "information if the answer is present in the remembered facts."
+    "Remembered facts may mention dates or events after your training data "
+    "ends; when the answer is in them, state it directly and say when it was "
+    "recorded. Facts the user taught you are authoritative. Facts from a data "
+    "lookup are snapshots as of their time, not live values. Never make up "
+    "numbers, hosts, addresses, or measurements: if they aren't in the "
+    "remembered facts or the conversation, say you don't have that data."
 )
 
 assistant_llm_provider = os.environ.get("ASSISTANT_LLM_PROVIDER", "ollama").strip().lower()
@@ -161,6 +192,25 @@ assistant_persona = PersonaProfile(
 )
 
 assistant_pipeline = ConversationPipeline(assistant_llm, assistant_persona)
+
+# network_monitoring's tools and its chat skills both report each answer to
+# the assistant's memory (record_lookup), so a report run from any host can
+# be referred back to in chat. The two personas only meet here.
+if network_monitoring_pipeline is not None:
+    register_network_activity_tools(
+        mcp, network_monitoring_pipeline,
+        default_index_pattern=network_index_pattern,
+        on_result=assistant_pipeline.record_lookup,
+    )
+    register_network_activity_resources(mcp, network_monitoring_pipeline, default_index_pattern=network_index_pattern)
+    register_network_activity_prompts(mcp)
+    for skill in network_activity_skills(
+            network_monitoring_pipeline,
+            index_pattern=network_index_pattern,
+            default_hours_back=network_chat_hours_back,
+            on_result=assistant_pipeline.record_lookup,
+    ):
+        assistant_pipeline.add_skill(skill)
 
 register_assistant_tools(mcp, assistant_pipeline)
 register_assistant_resources(mcp, assistant_pipeline, model_name=assistant_model_name)

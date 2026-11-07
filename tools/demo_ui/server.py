@@ -38,7 +38,6 @@ sys.path.insert(0, str(HERE.parent / "mcp_client"))
 from dev_client import SERVER_PARAMS  # noqa: E402  (one definition of how to launch the server)
 from simulators import SimulatorManager  # noqa: E402
 
-DEMO_INDEX_PATTERN = "network-activity-*"  # scopes the network report to network data, not Elastic's own metrics
 STATUS_URI = "telemetry://collection-status"
 
 
@@ -137,9 +136,9 @@ async def web_search(request: Request) -> JSONResponse:
 
 async def network_report(request: Request) -> JSONResponse:
     body = await _json_body(request)
+    # index scope comes from the server's NETWORK_ES_INDEX_PATTERN, not from here
     return await _call_tool(request, "network_activity_report", {
-        "hours_back": max(1, _int(body, "hours_back", 2)),
-        "index_pattern": DEMO_INDEX_PATTERN,
+        "hours_back": max(1, _int(body, "hours_back", 24)),
     })
 
 

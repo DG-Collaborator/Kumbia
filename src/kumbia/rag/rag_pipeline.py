@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from kumbia.core.domain.data_table import DataTable
 from kumbia.rag.clients.llm_client import LlmClient
+from kumbia.rag.grounding import unsupported_figures
 from kumbia.rag.in_memory_vector_index import InMemoryVectorIndex
 
 
@@ -37,11 +38,23 @@ class RagPipeline:
            The RAG query. Embeds the question, pulls the most similar rows
            from the index, and asks the llm to answer using only those rows as
            context, so the answer is grounded in the ingested source rather than
-           the model's training data.
+           the model's training data. If the answer states a figure (number,
+           IP) that isn't in the retrieved rows or the question, it is not
+           returned; the matching rows are shown instead, so nothing invented
+           ever reaches the caller.
         """
         query_vector = await self._llm.embed(question)
         context = self._index.search(query_vector, top_k)
-        return await self._llm.generate(_build_prompt(question, context))
+        answer = await self._llm.generate(_build_prompt(question, context), temperature=0)
+
+        unsupported = unsupported_figures(answer, question, *context)
+        if not unsupported:
+            return answer
+        rows = "\n".join(f"- {row}" for row in context) or "(no matching rows)"
+        return (
+            "I couldn't give a precise answer from the data, so here are the closest matching records "
+            f"(the drafted answer cited {', '.join(unsupported)}, which the records don't contain):\n{rows}"
+        )
 
 
 def _build_prompt(question: str, context: list[str]) -> str:

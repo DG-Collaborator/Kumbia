@@ -4,8 +4,9 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from statistics import mean, pstdev
 
 from kumbia.core.domain.data_table import DataTable
 
@@ -29,6 +30,27 @@ class Summary:
     volume: list[VolumeBucket]
     total_doc_count: int
     busiest_bucket: VolumeBucket | None
+    anomalies: list[VolumeBucket] = field(default_factory=list)
+    interval: str = "1h"
+    newest_event: str | None = None  # only looked up when the window is empty
+
+
+@dataclass(frozen=True)
+class FieldValue:
+    value: str
+    doc_count: int
+
+
+@dataclass(frozen=True)
+class FieldBreakdown:
+    alias: str
+    field_name: str
+    distinct_count: int
+    values: list[FieldValue]
+
+
+ANOMALY_SIGMA = 2.0
+_MIN_BUCKETS_FOR_ANOMALIES = 4
 
 
 def top_talkers(table: DataTable) -> list[TopTalker]:
@@ -59,7 +81,24 @@ def volume_over_time(table: DataTable) -> list[VolumeBucket]:
     ]
 
 
-def summarize(top_talkers_table: DataTable, volume_table: DataTable) -> Summary:
+def volume_anomalies(volume: list[VolumeBucket], sigma: float = ANOMALY_SIGMA) -> list[VolumeBucket]:
+    """
+       Buckets whose count is more than sigma standard deviations above the
+       window's mean — plain statistics, so a "spike" is a computed fact the
+       narration can only repeat, never decide. Too few buckets (or a flat
+       series) yields none rather than a meaningless flag.
+    """
+    if len(volume) < _MIN_BUCKETS_FOR_ANOMALIES:
+        return []
+    counts = [bucket.doc_count for bucket in volume]
+    spread = pstdev(counts)
+    if spread == 0:
+        return []
+    threshold = mean(counts) + sigma * spread
+    return [bucket for bucket in volume if bucket.doc_count > threshold]
+
+
+def summarize(top_talkers_table: DataTable, volume_table: DataTable, interval: str = "1h") -> Summary:
     talkers = top_talkers(top_talkers_table)
     volume = volume_over_time(volume_table)
     return Summary(
@@ -67,7 +106,31 @@ def summarize(top_talkers_table: DataTable, volume_table: DataTable) -> Summary:
         volume=volume,
         total_doc_count=sum(bucket.doc_count for bucket in volume),
         busiest_bucket=max(volume, key=lambda bucket: bucket.doc_count, default=None),
+        anomalies=volume_anomalies(volume),
+        interval=interval,
     )
+
+
+def field_breakdown(alias: str, field_name: str, values_table: DataTable, distinct_table: DataTable) -> FieldBreakdown:
+    values = [
+        FieldValue(value=row.value("key"), doc_count=_to_int(row.value("doc_count")))
+        for row in values_table.rows
+    ]
+    distinct = _to_int(distinct_table.rows[0].value("distinct")) if distinct_table.rows else len(values)
+    return FieldBreakdown(
+        alias=alias,
+        field_name=field_name,
+        distinct_count=distinct,
+        values=sorted(values, key=lambda v: v.doc_count, reverse=True),
+    )
+
+
+def newest_event(latest_table: DataTable) -> str | None:
+    """The max-timestamp aggregation's value (epoch millis) as ISO, or None if the scope has no events."""
+    if not latest_table.rows:
+        return None
+    millis = _to_int(latest_table.rows[0].value("newest"))
+    return _epoch_millis_to_iso(millis) if millis > 0 else None
 
 
 def _to_int(value: str) -> int:

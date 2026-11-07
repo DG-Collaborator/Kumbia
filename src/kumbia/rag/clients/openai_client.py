@@ -40,16 +40,22 @@ class OpenAiClient:
         data = response.json()["data"]
         return data[0]["embedding"] if data else []
 
-    async def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    async def generate(
+            self, prompt: str, system_prompt: str | None = None, temperature: float | None = None,
+    ) -> str:
         messages = []
         if system_prompt is not None:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        body: dict[str, object] = {"model": self._generate_model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
+
         response = await self._client.post(
             CHAT_COMPLETIONS_URL,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"model": self._generate_model, "messages": messages},
+            json=body,
         )
         if response.is_error:
             raise RuntimeError(

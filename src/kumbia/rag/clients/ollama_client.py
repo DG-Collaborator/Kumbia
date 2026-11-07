@@ -35,7 +35,9 @@ class OllamaClient:
             )
         return response.json().get("embedding", [])
 
-    async def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    async def generate(
+            self, prompt: str, system_prompt: str | None = None, temperature: float | None = None,
+    ) -> str:
         payload: dict[str, object] = {
             "model": self._generate_model,
             "prompt": prompt,
@@ -43,6 +45,8 @@ class OllamaClient:
         }
         if system_prompt is not None:
             payload["system"] = system_prompt
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
 
         response = await self._client.post(
             f"{self._base_url}/api/generate",

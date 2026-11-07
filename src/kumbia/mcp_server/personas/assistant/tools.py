@@ -140,9 +140,11 @@ def register_correlated_telemetry_tool(mcp: MCPServer, pipeline: ConversationPip
 
     pipeline.add_skill(Skill(
         name="correlated_telemetry_report",
-        description="collected telemetry over time per asset: power draw (watts), CPU utilization, "
-                    "and network activity (event counts per time bucket, incl. traffic/ingress/egress "
-                    "questions). For trends, peaks, lows, changes, and how these metrics relate.",
+        description="the monitored asset's collected telemetry per time bucket: power draw (watts), "
+                    "CPU utilization, and its own network event count, correlated with each other. "
+                    "For trends, peaks, lows, and changes in power or CPU, and how power, CPU, and "
+                    "the asset's network activity move together. Not for hosts, DNS names, or "
+                    "network-wide traffic.",
         run=report,
     ))
 

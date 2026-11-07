@@ -31,18 +31,29 @@
      Explicitly-remembered facts (memory_path) and auto-cached query_data_source
      results (cache_path) are kept in separate on-disk files so a persona's
      curated facts stay distinct from automated lookups, but both feed the same
-     retrieval index so the persona can draw on either when answering.
+     retrieval index so the persona can draw on either when answering. Each
+     entry is indexed with a provenance label ("[source · as of <time>]") so
+     the model can tell a fact the user taught it from an older snapshot of a
+     data lookup, and say how fresh the snapshot is.
+
+     Hallucination guards, all deterministic: routing picks a skill name from
+     a fixed list (or "none" / "unavailable", never a query); narrations and
+     free-form replies are checked by rag.grounding.unsupported_figures
+     against the evidence they were given, and any reply stating a figure the
+     evidence doesn't contain is withheld rather than returned.
 """
 from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from kumbia.core.domain.data_table import DataTable
 from kumbia.core.source.data_source import DataSource
 from kumbia.core.source.source_query import SourceQuery
 from kumbia.rag.clients.llm_client import LlmClient
+from kumbia.rag.grounding import unsupported_figures, withhold_unsupported
 from kumbia.rag.in_memory_vector_index import InMemoryVectorIndex
 from kumbia.rag.memory_store import append_memory, load_memory_table
 from kumbia.rag.persona_profile import PersonaProfile
@@ -57,12 +68,26 @@ _NARRATION_INSTRUCTIONS = (
 
 _ROUTING_INSTRUCTIONS = (
     "You decide whether a user's message needs one of the data skills listed "
-    "below. Reply with exactly one skill name from the list, or with none if the "
-    "message is small talk, general knowledge, or not about any listed skill's "
-    "data. Reply with the name only, no other words."
+    "below. Reply with exactly one skill name from the list when the message asks "
+    "about that skill's data. Reply with none if the message is small talk, about "
+    "this conversation, or about something the user asked you to remember. Reply "
+    "with unavailable if the message asks for data (metrics, readings, hosts, "
+    "events, logs, figures) that none of the listed skills provides. Reply with "
+    "the single word only, no other words."
 )
 
 _ROUTING_HISTORY_TURNS = 4
+_UNAVAILABLE = "unavailable"
+
+_GROUNDING_RULES = (
+    "Rules: the remembered facts are labeled with where they came from and when. "
+    "A fact from a data lookup is a snapshot as of its time, not necessarily the "
+    "current value; say its time when you use it. Never state a number, address, "
+    "host, or measurement that is not in the remembered facts, the conversation, "
+    "or the user's message. If you don't have it, say so plainly."
+)
+
+_REMEMBER_REQUEST = re.compile(r"^\s*(?:please\s+)?remember(?:\s+that|\s*:)\s+(?P<fact>.+)$", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass
@@ -130,7 +155,9 @@ class ConversationPipeline:
             table = load_memory_table(path)
             for row in table.rows:
                 vector = await self._llm.embed(row.value("text"))
-                self._memory_index.add(row.value("text"), vector)
+                self._memory_index.add(
+                    _labeled(row.value("text"), row.value("source"), row.value("created_at")), vector,
+                )
         self._memory_loaded = True
 
     async def remember(self, fact: str) -> None:
@@ -141,7 +168,7 @@ class ConversationPipeline:
         await self.ensure_memory_loaded()
         append_memory(self._persona.memory_path, fact, source="user")
         vector = await self._llm.embed(fact)
-        self._memory_index.add(fact, vector)
+        self._memory_index.add(_labeled(fact, "user", _now_iso()), vector)
 
     async def query_data_source(self, name: str, question: str) -> str:
         """
@@ -191,10 +218,11 @@ class ConversationPipeline:
 
         figures = summarize(table)
         system_prompt = f"{self._persona.system_prompt}\n\n{_NARRATION_INSTRUCTIONS}\n\nFigures:\n{figures}"
-        narration = await self._llm.generate(question, system_prompt=system_prompt)
+        narration = await self._llm.generate(question, system_prompt=system_prompt, temperature=0)
+        narration = withhold_unsupported(narration, figures, question)
 
         answer = f"{figures}\n\n{narration}"
-        await self._cache(name, answer)
+        await self.record_lookup(name, answer)
         return answer
 
     def _require_data_source(self, name: str) -> DataSource:
@@ -217,55 +245,92 @@ class ConversationPipeline:
         await lookup_pipeline.ingest(table)
         answer = await lookup_pipeline.answer(question)
 
-        await self._cache(name, answer)
+        await self.record_lookup(name, answer)
         return answer
 
-    async def _cache(self, name: str, answer: str) -> None:
+    async def record_lookup(self, source: str, answer: str) -> None:
         """
-           Caches a synthesized answer to the persona's cache_path (tagged
-           with the source name) and makes it searchable now, so a repeated
-           question doesn't need a re-fetch, while keeping auto-cached
+           Caches a data-backed answer to the persona's cache_path (tagged
+           with the source it came from) and makes it searchable now, so
+           later chat can refer back to it, while keeping auto-cached
            lookups distinct from explicitly-taught facts (remember()).
+           Public so the composition root can hand it to any other producer
+           of data-backed answers (another persona's tools, for example) as
+           a plain callback, without that producer knowing this pipeline.
         """
-        append_memory(self._persona.cache_path, answer, source=name)
+        await self.ensure_memory_loaded()
+        append_memory(self._persona.cache_path, answer, source=source)
         vector = await self._llm.embed(answer)
-        self._memory_index.add(answer, vector)
+        self._memory_index.add(_labeled(answer, source, _now_iso()), vector)
 
     async def ask(self, text: str) -> str:
         """
-           Continues the conversation. When skills are registered, first asks
-           the LLM whether text needs one; if so the skill answers (from real
-           data) and that answer becomes the assistant's turn, otherwise the
-           reply is generated from history and remembered facts as before.
+           Continues the conversation. "Remember that ..." is stored directly
+           as a fact (no LLM involved). Otherwise, when skills are registered,
+           the LLM first picks one by name: a skill answers from real data;
+           "unavailable" (a data question no skill covers) gets a plain
+           statement of what data exists instead of a guess; anything else is
+           answered from history and labeled remembered facts, with the reply
+           withheld if it states a figure none of that evidence contains.
         """
         await self.ensure_memory_loaded()
-        skill = await self._route(text)
-        self._history.append(Turn("user", text))
 
+        remember_request = _REMEMBER_REQUEST.match(text)
+        if remember_request:
+            fact = remember_request.group("fact").strip()
+            await self.remember(fact)
+            return self._record_turn(text, f"Got it, I'll remember: {fact}")
+
+        skill, unavailable = await self._route(text)
         if skill is not None:
-            reply = f"(answered from {skill.name})\n\n{await skill.run(text)}"
-        else:
-            memory_context: list[str] = []
-            if self._memory_index.size > 0:
-                query_vector = await self._llm.embed(text)
-                memory_context = self._memory_index.search(query_vector, self._memory_top_k)
+            return self._record_turn(text, f"(answered from {skill.name})\n\n{await skill.run(text)}")
+        if unavailable:
+            return self._record_turn(text, self._unavailable_reply())
 
-            prompt = _build_prompt(self._history, memory_context)
-            reply = await self._llm.generate(prompt, system_prompt=self._persona.system_prompt)
+        memory_context: list[str] = []
+        if self._memory_index.size > 0:
+            query_vector = await self._llm.embed(text)
+            memory_context = self._memory_index.search(query_vector, self._memory_top_k)
+
+        history = [*self._history, Turn("user", text)]
+        system_prompt = f"{self._persona.system_prompt}\n\n{_GROUNDING_RULES}"
+        reply = await self._llm.generate(_build_prompt(history, memory_context), system_prompt=system_prompt)
+        if self._persona.strict_grounding:
+            evidence = [text, *memory_context, *(turn.text for turn in self._history)]
+            if unsupported_figures(reply, *evidence):
+                reply = (
+                    "I don't have data that supports a specific answer to that. "
+                    + self._available_data_hint()
+                )
+        return self._record_turn(text, reply)
+
+    def _record_turn(self, text: str, reply: str) -> str:
+        self._history.append(Turn("user", text))
         self._history.append(Turn("assistant", reply))
         return reply
 
-    async def _route(self, text: str) -> Skill | None:
+    def _unavailable_reply(self) -> str:
+        return "I don't have a data source that answers that. " + self._available_data_hint()
+
+    def _available_data_hint(self) -> str:
+        if not self._skills:
+            return "No data sources are connected right now."
+        listed = "\n".join(f"- {skill.name}: {skill.description}" for skill in self._skills.values())
+        return f"I can answer from:\n{listed}"
+
+    async def _route(self, text: str) -> tuple[Skill | None, bool]:
         """
-           One short LLM call choosing a skill by name. Anything other than
-           exactly one recognizable skill name (none, an unknown name, two
-           names) falls back to plain conversation rather than guessing.
+           One short, temperature-0 LLM call choosing a skill by name.
+           Returns (skill, False) for exactly one recognizable skill name,
+           (None, True) for "unavailable", and (None, False) for anything
+           else (none, an unknown name, two names), which falls back to
+           plain conversation rather than guessing a skill.
         """
         if not self._skills:
-            return None
+            return None, False
         catalog = "\n".join(f"- {skill.name}: {skill.description}" for skill in self._skills.values())
         recent = "\n".join(
-            f"{'User' if turn.role == 'user' else 'Assistant'}: {turn.text}"
+            f"{'User' if turn.role == 'user' else 'Assistant'}: {_clip(turn.text)}"
             for turn in self._history[-_ROUTING_HISTORY_TURNS:]
         )
         prompt = (
@@ -273,13 +338,29 @@ class ConversationPipeline:
             + (f"Recent conversation:\n{recent}\n\n" if recent else "")
             + f"Message: {text}\nSkill:"
         )
-        choice = await self._llm.generate(prompt, system_prompt=_ROUTING_INSTRUCTIONS)
+        choice = await self._llm.generate(prompt, system_prompt=_ROUTING_INSTRUCTIONS, temperature=0)
         named = set(re.findall(r"[a-z0-9_]+", choice.lower()))
         matches = [skill for name, skill in self._skills.items() if name in named]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0], False
+        return None, (not matches and _UNAVAILABLE in named)
 
     def reset(self) -> None:
         self._history.clear()
+
+
+def _labeled(text: str, source: str, created_at: str) -> str:
+    origin = "taught by the user" if source in ("", "user") else f"lookup from {source}"
+    when = created_at[:16].replace("T", " ") + " UTC" if created_at else "unknown time"
+    return f"[{origin} · as of {when}] {text}"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _clip(text: str, limit: int = 300) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _build_prompt(history: list[Turn], memory_context: list[str]) -> str:

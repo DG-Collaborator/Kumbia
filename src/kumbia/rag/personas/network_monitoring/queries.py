@@ -8,15 +8,26 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 
 @dataclass(frozen=True)
 class FieldMapping:
+    """
+       Where this persona finds things in the index. breakdown_fields maps a
+       short alias (lowercase letters, digits, underscores — it becomes part
+       of a skill/tool name) to any aggregatable field worth breaking traffic
+       down by (an app name, a destination port, a country, ...). Empty means
+       "just the DNS field", which every Gigamon AMI-shaped index has.
+    """
     host_field: str = "host.ip"
     dns_field: str = "gigamon.ami.dns_name"
     timestamp_field: str = "@timestamp"
+    breakdown_fields: dict[str, str] = field(default_factory=dict)
+
+    def breakdowns(self) -> dict[str, str]:
+        return dict(self.breakdown_fields) or {"dns": self.dns_field}
 
 
 DEFAULT_FIELD_MAPPING = FieldMapping()
@@ -54,16 +65,57 @@ def top_talkers(window: TimeWindow, top_n: int, fields: FieldMapping = DEFAULT_F
     })
 
 
-def volume_over_time(window: TimeWindow, fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
-    """Hourly doc-count volume across the window, for spotting spikes/lulls."""
+def bucket_interval(hours_back: int) -> str:
+    """
+       A histogram bucket size that keeps any window readable: fine enough to
+       show a spike in a short window, coarse enough not to drown a long one.
+    """
+    if hours_back <= 6:
+        return "5m"
+    if hours_back <= 72:
+        return "1h"
+    return "1d"
+
+
+def volume_over_time(
+        window: TimeWindow, fields: FieldMapping = DEFAULT_FIELD_MAPPING, interval: str = "1h",
+) -> str:
+    """Doc-count volume per interval across the window, for spotting spikes/lulls."""
     return json.dumps({
         "size": 0,
         "query": {"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}},
         "aggs": {
             "over_time": {
-                "date_histogram": {"field": fields.timestamp_field, "fixed_interval": "1h"}
+                "date_histogram": {"field": fields.timestamp_field, "fixed_interval": interval}
             }
         },
+    })
+
+
+def latest_event(fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Newest event timestamp anywhere in scope (no window), to explain an empty window."""
+    return json.dumps({
+        "size": 0,
+        "aggs": {"newest": {"max": {"field": fields.timestamp_field}}},
+    })
+
+
+def field_breakdown(window: TimeWindow, field_name: str, top_n: int,
+                    fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Event count per value of one field across the window, most frequent first."""
+    return json.dumps({
+        "size": 0,
+        "query": {"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}},
+        "aggs": {"values": {"terms": {"field": field_name, "size": top_n}}},
+    })
+
+
+def distinct_values(window: TimeWindow, field_name: str, fields: FieldMapping = DEFAULT_FIELD_MAPPING) -> str:
+    """Approximate count of distinct values of one field across the window."""
+    return json.dumps({
+        "size": 0,
+        "query": {"range": {fields.timestamp_field: {"gte": window.from_iso, "lte": window.to_iso}}},
+        "aggs": {"distinct": {"cardinality": {"field": field_name}}},
     })
 
 
