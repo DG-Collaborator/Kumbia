@@ -135,6 +135,9 @@ network_fields = FieldMapping(
 network_chat_hours_back = int(os.environ.get("NETWORK_CHAT_HOURS_BACK", "24"))
 network_drilldown_max_events = int(os.environ.get("NETWORK_DRILLDOWN_MAX_EVENTS", "20"))
 network_host_aliases = _host_aliases(os.environ.get("NETWORK_HOST_ALIASES", ""))
+network_report_metrics = tuple(
+    alias for alias in (part.strip().lower() for part in os.environ.get("NETWORK_REPORT_METRICS", "").split(",")) if alias
+)
 
 # optional: enables network_activity_report/drilldown/field_breakdown;
 # registers no-op unless both ES_URL and OPENAI_API_KEY are set — the
@@ -150,6 +153,7 @@ if elasticsearch_url and openai_api_key:
         llm=OpenAiClient(http_client, api_key=openai_api_key),
         fields=network_fields,
         host_aliases=network_host_aliases,
+        report_metrics=network_report_metrics,
     )
 
 

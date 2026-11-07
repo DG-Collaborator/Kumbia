@@ -192,7 +192,9 @@ def network_activity_skills(
             name="network_activity_report",
             description="network traffic across all hosts over a time window: number of connection "
                         "records, top talkers (busiest source IPs), distinct destinations per host, "
-                        "volume over time, spikes.",
+                        "volume over time, spikes"
+                        + (" and traffic totals with top hosts by volume" if pipeline.report_metrics else "")
+                        + ".",
             run=report,
         ),
         Skill(

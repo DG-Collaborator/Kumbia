@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from kumbia.core.source.data_source import DataSource
 from kumbia.core.domain.data_table import DataTable
@@ -29,7 +29,9 @@ from kumbia.rag.personas.network_monitoring.engine import (
     FieldBreakdown,
     FieldValue,
     HostProfile,
+    MetricHost,
     MetricReport,
+    MetricStats,
     Summary,
 )
 from kumbia.rag.personas.network_monitoring.queries import DEFAULT_FIELD_MAPPING, FieldMapping
@@ -38,10 +40,12 @@ DEFAULT_INDEX_PATTERN = "*"  # unscoped: all network activity, not any one log s
 _PROFILE_TOP_N = 5
 
 _DEFAULT_NARRATIVE_PROMPT = (
-    "Summarize this network activity in 3-4 short paragraphs. Call out any top "
-    "talker that looks unusual (e.g. very high volume against very few distinct "
-    "destinations), any flagged volume spikes, and whether traffic volume was "
-    "steady or spiky across the window."
+    "Summarize this network activity in 3-4 short paragraphs: how much traffic "
+    "there was, which hosts carried most of it and to how many destinations, any "
+    "flagged volume spikes, and whether volume was steady or spiky across the "
+    "window. Describe patterns factually; don't label a host suspicious or say it "
+    "needs investigation — a service talking heavily to a few backends (for "
+    "example an app and its database) is normal."
 )
 
 _NARRATION_RULES = (
@@ -49,7 +53,10 @@ _NARRATION_RULES = (
     "Elasticsearch aggregations. Do not recalculate, estimate, or contradict them, "
     "and do not introduce any number, host, or value that is not listed. Do not "
     "convert units or round numbers into other units (e.g. bytes to MB); quote them "
-    "as given. If the figures don't answer the question, say what they do show instead."
+    "as given. Words like worst, slowest, highest, or peak refer to the bucket with "
+    "the highest average, not the one with the largest total, unless the question "
+    "is about volume or totals. If the figures don't answer the question, say what "
+    "they do show instead."
 )
 
 
@@ -59,6 +66,16 @@ class NetworkActivityReport:
     index_pattern: str
     summary: Summary
     narrative: str
+    traffic: list[TrafficMetric] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TrafficMetric:
+    """One report metric (e.g. bytes sent): its window total and the hosts with the largest totals."""
+    alias: str
+    field_name: str
+    stats: MetricStats
+    top_hosts: list[MetricHost]
 
 
 @dataclass(frozen=True)
@@ -100,6 +117,7 @@ class NetworkActivityPipeline:
             llm: LlmClient | None,
             fields: FieldMapping = DEFAULT_FIELD_MAPPING,
             host_aliases: dict[str, str] | None = None,
+            report_metrics: tuple[str, ...] = (),
     ) -> None:
         self._data_source = data_source
         self._source_address = source_address
@@ -108,6 +126,12 @@ class NetworkActivityPipeline:
         self._fields = fields
         self._host_aliases = dict(host_aliases or {})
         self._names = {ip: name for name, ip in self._host_aliases.items()}
+        unknown = [alias for alias in report_metrics if alias not in fields.metric_fields]
+        if unknown:
+            raise ValueError(
+                f"Report metrics {unknown} aren't configured metrics; configured: {sorted(fields.metric_fields)}."
+            )
+        self._report_metrics = tuple(report_metrics)
 
     @property
     def breakdown_fields(self) -> dict[str, str]:
@@ -123,6 +147,11 @@ class NetworkActivityPipeline:
     def metric_fields(self) -> dict[str, str]:
         """Alias -> numeric field for every metric this pipeline can report on."""
         return dict(self._fields.metric_fields)
+
+    @property
+    def report_metrics(self) -> tuple[str, ...]:
+        """Metric aliases every activity report also totals (e.g. bytes in/out)."""
+        return self._report_metrics
 
     @property
     def host_labels(self) -> dict[str, str]:
@@ -168,19 +197,43 @@ class NetworkActivityPipeline:
             question: str | None = None,
             index_pattern: str = DEFAULT_INDEX_PATTERN,
     ) -> NetworkActivityReport:
-        summary = await self.summary(hours_back, top_n, index_pattern)
+        summary, traffic = await asyncio.gather(
+            self.summary(hours_back, top_n, index_pattern),
+            self._traffic(hours_back, index_pattern),
+        )
 
         if summary.total_doc_count == 0:
             narrative = _empty_window_text(hours_back, summary.newest_event)
         else:
-            narrative = await self._narrate(_summary_text(hours_back, index_pattern, summary, self._names), question)
+            figures = _summary_text(hours_back, index_pattern, summary, self._names, traffic)
+            narrative = await self._narrate(figures, question)
 
         return NetworkActivityReport(
             hours_back=hours_back,
             index_pattern=index_pattern,
             summary=summary,
             narrative=narrative,
+            traffic=traffic,
         )
+
+    async def _traffic(self, hours_back: int, index_pattern: str, top_n: int = 5) -> list[TrafficMetric]:
+        """The configured report metrics' totals and top hosts by total, all fetched concurrently."""
+        if not self._report_metrics:
+            return []
+        window = queries.last_hours(hours_back)
+        names = [self._fields.metric_fields[alias] for alias in self._report_metrics]
+        tables = await asyncio.gather(*(
+            fetch
+            for name in names
+            for fetch in (
+                self._fetch(index_pattern, queries.metric_stats(window, name, self._fields)),
+                self._fetch(index_pattern, queries.metric_top_hosts(window, name, top_n, "total", self._fields)),
+            )
+        ))
+        return [
+            TrafficMetric(alias, name, engine.metric_stats(tables[2 * i]), engine.metric_hosts(tables[2 * i + 1]))
+            for i, (alias, name) in enumerate(zip(self._report_metrics, names))
+        ]
 
     async def breakdown(
             self,
@@ -356,7 +409,8 @@ class NetworkActivityPipeline:
 
 
 def to_text(report: NetworkActivityReport, labels: dict[str, str] | None = None) -> str:
-    return _summary_text(report.hours_back, report.index_pattern, report.summary, labels) + "\n\n" + report.narrative
+    figures = _summary_text(report.hours_back, report.index_pattern, report.summary, labels, report.traffic)
+    return figures + "\n\n" + report.narrative
 
 
 def metric_report_text(report: NetworkMetricReport) -> str:
@@ -392,7 +446,7 @@ def _empty_window_text(hours_back: int, newest_event: str | None) -> str:
 
 
 def _summary_text(hours_back: int, index_pattern: str, summary: Summary,
-                  labels: dict[str, str] | None = None) -> str:
+                  labels: dict[str, str] | None = None, traffic: list[TrafficMetric] | None = None) -> str:
     lines = [
         f"Window: last {hours_back} hour(s)",
         f"Scope: {index_pattern}",
@@ -424,6 +478,16 @@ def _summary_text(hours_back: int, index_pattern: str, summary: Summary,
         )
     if summary.top_talkers and not dns_recorded:
         lines.append("DNS names: not recorded for these hosts in this window")
+
+    for metric in traffic or []:
+        lines.append("")
+        lines.append(
+            f"Traffic — {metric.alias} ({metric.field_name}, in that field's units): "
+            f"total {_num(metric.stats.total)} over {metric.stats.count} records"
+        )
+        if metric.top_hosts:
+            lines.append(f"Top hosts by {metric.alias}:")
+            lines.extend(f"  {_label(h.host_ip, labels)} — {_num(h.total)}" for h in metric.top_hosts)
     return "\n".join(lines)
 
 
@@ -468,10 +532,18 @@ def _metric_text(hours_back: int, index_pattern: str, report: MetricReport,
         )
     peak_total, peak_mean, low_mean = report.peak_total_bucket, report.peak_mean_bucket, report.low_mean_bucket
     if peak_total is not None:
-        lines.append(f"Highest-total {report.interval} bucket: {peak_total.timestamp} (total {_num(peak_total.total)})")
+        lines.append(
+            f"{report.interval} bucket with the largest total (most measurements/volume): "
+            f"{peak_total.timestamp} (total {_num(peak_total.total)})"
+        )
     if peak_mean is not None and low_mean is not None:
-        lines.append(f"Highest-average {report.interval} bucket: {peak_mean.timestamp} (average {_num(peak_mean.mean)})")
-        lines.append(f"Lowest-average {report.interval} bucket: {low_mean.timestamp} (average {_num(low_mean.mean)})")
+        lines.append(
+            f"{report.interval} bucket with the highest average (peak level): "
+            f"{peak_mean.timestamp} (average {_num(peak_mean.mean)})"
+        )
+        lines.append(
+            f"{report.interval} bucket with the lowest average: {low_mean.timestamp} (average {_num(low_mean.mean)})"
+        )
     return "\n".join(lines)
 
 

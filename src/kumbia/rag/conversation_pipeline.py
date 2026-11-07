@@ -90,7 +90,9 @@ _GROUNDING_RULES = (
     "A fact from a data lookup is a snapshot as of its time, not necessarily the "
     "current value; say its time when you use it. Never state a number, address, "
     "host, or measurement that is not in the remembered facts, the conversation, "
-    "or the user's message. If you don't have it, say so plainly."
+    "or the user's message. When saved answers about the same thing disagree, the "
+    "newest one is current: use it unless the user asks about an older one. If you "
+    "don't have it, say so plainly."
 )
 
 _MAX_TAUGHT_FACTS_SHOWN = 3
@@ -134,6 +136,7 @@ class ConversationPipeline:
         self._memory_loaded = False
         self._skills: dict[str, Skill] = {}
         self._taught: list[str] = []  # facts the user taught, verbatim, for exact-match recall
+        self._latest_lookup: dict[str, tuple[str, str]] = {}  # source -> (created_at, labeled answer)
 
     def add_skill(self, skill: Skill) -> None:
         """Makes skill reachable from ask(). Registered by the composition layer, never by the LLM."""
@@ -164,6 +167,9 @@ class ConversationPipeline:
             row.value("text") for row in load_memory_table(self._persona.memory_path).rows
             if row.value("source") in ("", "user")
         ]
+        for row in load_memory_table(self._persona.cache_path).rows:  # file order = oldest first
+            source, created_at = row.value("source"), row.value("created_at")
+            self._latest_lookup[source] = (created_at, _labeled(row.value("text"), source, created_at))
         for path in (self._persona.memory_path, self._persona.cache_path):
             rows = load_memory_table(path).rows
             vectors = await embed_all(self._llm, [row.value("text") for row in rows])
@@ -274,8 +280,11 @@ class ConversationPipeline:
         """
         await self.ensure_memory_loaded()
         append_memory(self._persona.cache_path, answer, source=source)
+        created_at = _now_iso()
+        labeled = _labeled(answer, source, created_at)
+        self._latest_lookup[source] = (created_at, labeled)
         vector = await self._llm.embed(answer)
-        self._memory_index.add(_labeled(answer, source, _now_iso()), vector)
+        self._memory_index.add(labeled, vector)
 
     async def ask(self, text: str) -> str:
         """
@@ -303,22 +312,41 @@ class ConversationPipeline:
         if unavailable:
             return self._record_turn(text, self._unavailable_reply())
 
+        latest = self._latest_matching_lookups(text)
         memory_context: list[str] = []
         if self._memory_index.size > 0:
             query_vector = await self._llm.embed(text)
-            memory_context = self._memory_index.search(query_vector, self._memory_top_k)
+            memory_context = [
+                fact for fact in self._memory_index.search(query_vector, self._memory_top_k) if fact not in latest
+            ]
 
         history = [*self._history, Turn("user", text)]
         system_prompt = f"{self._persona.system_prompt}\n\n{_GROUNDING_RULES}"
-        reply = await self._llm.generate(_build_prompt(history, memory_context), system_prompt=system_prompt)
+        reply = await self._llm.generate(_build_prompt(history, memory_context, latest), system_prompt=system_prompt)
         if self._persona.strict_grounding:
-            evidence = [text, *memory_context, *(turn.text for turn in self._history)]
+            evidence = [text, *latest, *memory_context, *(turn.text for turn in self._history)]
             if unsupported_figures(reply, *evidence):
                 reply = (
                     "I don't have data that supports a specific answer to that. "
                     + self._available_data_hint()
                 )
         return self._record_turn(text, reply)
+
+    def _latest_matching_lookups(self, question: str) -> list[str]:
+        """
+           The newest saved answer from each data source the question names
+           (enough of the source's name words appear in it: "the last network
+           report" -> network_activity_report), newest first. Similarity
+           search alone can surface an older snapshot of the same report;
+           this guarantees the most recent one is in front of the model.
+        """
+        words = set(re.findall(r"[a-z0-9]+", question.lower()))
+        matches = []
+        for source, (created_at, labeled) in self._latest_lookup.items():
+            tokens = [token for token in source.lower().split("_") if token]
+            if tokens and sum(token in words for token in tokens) >= min(2, len(tokens)):
+                matches.append((created_at, labeled))
+        return [labeled for _, labeled in sorted(matches, reverse=True)]
 
     def _taught_facts_note(self, question: str, answer: str) -> str:
         """
@@ -417,8 +445,12 @@ def _clip(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _build_prompt(history: list[Turn], memory_context: list[str]) -> str:
+def _build_prompt(history: list[Turn], memory_context: list[str], latest: list[str] | None = None) -> str:
     lines: list[str] = []
+    if latest:
+        lines.append("Newest saved answer from each data source this message mentions (newest first):")
+        lines.extend(f"- {answer}" for answer in latest)
+        lines.append("")
     if memory_context:
         lines.append("Remembered facts that might be relevant:")
         lines.extend(f"- {fact}" for fact in memory_context)
