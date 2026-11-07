@@ -143,6 +143,57 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* tabs + history */
+.tabs { display: flex; gap: 4px; }
+.tab {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hist-scroll { flex: 1; overflow-y: auto; padding: 8px 16px 16px; }
+.hist-day {
+  position: sticky; top: 0;
+  background: var(--panel);
+  font-size: 11.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--faint);
+  padding: 10px 0 6px;
+}
+.hist-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  padding: 9px 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.hist-item:hover { background: var(--bg); }
+.hist-time { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 1px; }
+.hist-prompt { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.hist-meta { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--faint); }
+.hist-meta .tool { font-family: var(--mono); background: var(--accent-soft); color: var(--accent); padding: 0 6px; border-radius: 4px; }
+.hist-meta .bad { color: var(--err); font-weight: 650; }
+.hist-meta .you { color: var(--ok); font-weight: 650; }
+.hist-empty { color: var(--muted); text-align: center; padding: 40px 12px; }
+.hist-more { display: flex; justify-content: center; padding-top: 12px; }
+.hist-detail { flex: 1; overflow-y: auto; padding: 14px 16px 18px; display: grid; gap: 12px; align-content: start; }
+.hist-detail h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.hist-detail .meta { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.hist-answer { padding: 10px 13px; border: 1px solid var(--line); border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; }
+.hist-answer.error { background: var(--err-soft); color: var(--err); border-color: transparent; }
 .part-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); font-weight: 650; }
 .split { display: grid; gap: 8px; }
 
@@ -236,11 +287,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 <div class="grid">
 
   <!-- chat -->
-  <section class="panel chat" aria-label="Conversation">
+  <section class="panel chat" aria-label="Assistant">
     <div class="panel-head">
-      <h2>Assistant</h2>
-      <span class="hint">Replies come from <code>answer_question</code>; the conversation is remembered while this page’s server runs.</span>
+      <div class="tabs" role="tablist" aria-label="Assistant views">
+        <button class="tab" type="button" role="tab" id="tab-conv" aria-selected="true" aria-controls="view-conv">Conversation</button>
+        <button class="tab" type="button" role="tab" id="tab-hist" aria-selected="false" aria-controls="view-hist" tabindex="-1">History</button>
+      </div>
+      <span class="hint" id="head-hint">Replies come from <code>answer_question</code>; the conversation is remembered while this page’s server runs.</span>
     </div>
+    <div class="view" id="view-conv" role="tabpanel" aria-labelledby="tab-conv">
     <div class="stream" id="stream" aria-live="polite">
       <div class="empty-state" id="empty-state">
         <b>Ask the assistant anything</b>
@@ -252,6 +307,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
       <textarea id="chat-input" rows="1" placeholder="Message the assistant (Enter to send, Shift+Enter for a new line)"></textarea>
       <button class="btn primary" id="chat-send" type="submit">Send</button>
     </form>
+    </div>
+    <div class="view" id="view-hist" role="tabpanel" aria-labelledby="tab-hist" hidden>
+      <div class="hist-scroll" id="hist-list"></div>
+      <div class="hist-detail" id="hist-detail" hidden></div>
+    </div>
   </section>
 
   <div class="side">
@@ -538,6 +598,143 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     });
   });
 
+  // ---------- tabs ----------
+  const HINTS = {
+    conv: $("head-hint").innerHTML,
+    hist: "Every question, report, and tool call from anyone using this console, newest first.",
+  };
+  function selectTab(name) {
+    const conv = name === "conv";
+    $("tab-conv").setAttribute("aria-selected", String(conv));
+    $("tab-hist").setAttribute("aria-selected", String(!conv));
+    $("tab-conv").tabIndex = conv ? 0 : -1;
+    $("tab-hist").tabIndex = conv ? -1 : 0;
+    $("view-conv").hidden = !conv;
+    $("view-hist").hidden = conv;
+    if (conv) $("head-hint").innerHTML = HINTS.conv; else $("head-hint").textContent = HINTS.hist;
+    if (!conv) { showHistoryList(); loadHistory(true); }
+  }
+  $("tab-conv").addEventListener("click", () => selectTab("conv"));
+  $("tab-hist").addEventListener("click", () => selectTab("hist"));
+  document.querySelector(".tabs").addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const next = $("tab-conv").getAttribute("aria-selected") === "true" ? "hist" : "conv";
+    selectTab(next);
+    $(next === "conv" ? "tab-conv" : "tab-hist").focus();
+  });
+
+  // ---------- history ----------
+  const hist = { entries: [], more: false, viewer: "", loading: false };
+
+  function dayLabel(date) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(date); day.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - day) / 86400000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    return date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  }
+  function timeLabel(date) { return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function renderHistoryList() {
+    const list = $("hist-list");
+    list.replaceChildren();
+    if (!hist.entries.length) {
+      list.append(el("div", "hist-empty", "Nothing yet. Questions, reports, and tool calls from anyone using this console will show up here."));
+      return;
+    }
+    let currentDay = "";
+    for (const entry of hist.entries) {
+      const when = new Date(entry.ts);
+      const day = dayLabel(when);
+      if (day !== currentDay) { list.append(el("div", "hist-day", day)); currentDay = day; }
+      const item = el("button", "hist-item");
+      item.type = "button";
+      item.append(el("span", "hist-time", timeLabel(when)), el("span", "hist-prompt", entry.prompt));
+      const meta = el("span", "hist-meta");
+      meta.append(el("span", "tool", entry.tool));
+      meta.append(el("span", entry.who === hist.viewer ? "you" : "", entry.who === hist.viewer ? `you (${entry.who})` : entry.who));
+      if (!entry.ok) meta.append(el("span", "bad", "error"));
+      item.append(meta);
+      item.addEventListener("click", () => openHistoryEntry(entry.id));
+      list.append(item);
+    }
+    if (hist.more) {
+      const wrap = el("div", "hist-more");
+      const button = el("button", "btn", "Load older");
+      button.type = "button";
+      button.addEventListener("click", () => loadHistory(false));
+      wrap.append(button);
+      list.append(wrap);
+    }
+  }
+
+  async function loadHistory(reset) {
+    if (hist.loading) return;
+    hist.loading = true;
+    try {
+      const before = !reset && hist.entries.length ? `&before=${encodeURIComponent(hist.entries[hist.entries.length - 1].id)}` : "";
+      const result = await api(`/api/history?limit=50${before}`);
+      if (!result.ok) { $("hist-list").replaceChildren(el("div", "hist-empty", result.error)); return; }
+      hist.viewer = result.data.viewer;
+      if (reset) { hist.entries = result.data.entries; hist.more = result.data.more; }
+      else { hist.entries = hist.entries.concat(result.data.entries); hist.more = result.data.more; }
+      renderHistoryList();
+    } finally { hist.loading = false; }
+  }
+
+  // live updates: prepend entries newer than the newest one shown
+  async function refreshHistory() {
+    if ($("view-hist").hidden || !$("hist-detail").hidden || hist.loading) return;
+    const result = await api("/api/history?limit=50");
+    if (!result.ok) return;
+    const known = new Set(hist.entries.map((e) => e.id));
+    const fresh = result.data.entries.filter((e) => !known.has(e.id));
+    if (!fresh.length) return;
+    const scroller = $("hist-list"), atTop = scroller.scrollTop < 8;
+    hist.entries = fresh.concat(hist.entries);
+    renderHistoryList();
+    if (atTop) scroller.scrollTop = 0;
+  }
+
+  function showHistoryList() { $("hist-detail").hidden = true; $("hist-list").hidden = false; }
+
+  async function openHistoryEntry(id) {
+    const detail = $("hist-detail");
+    detail.replaceChildren(el("div", "note", "Loading…"));
+    $("hist-list").hidden = true;
+    detail.hidden = false;
+    const result = await api(`/api/history/${encodeURIComponent(id)}`);
+    detail.replaceChildren();
+    const back = el("button", "btn", "← Back to history");
+    back.type = "button";
+    back.style.justifySelf = "start";
+    back.addEventListener("click", showHistoryList);
+    detail.append(back);
+    if (!result.ok) { detail.append(el("div", "hist-answer error", result.error)); return; }
+    const entry = result.data, when = new Date(entry.ts);
+    detail.append(el("h3", "", entry.prompt));
+    const meta = el("div", "meta");
+    meta.append(
+      el("span", "", when.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" })),
+      el("span", "", entry.who === hist.viewer ? `asked by you (${entry.who})` : `asked from ${entry.who}`),
+      el("span", "", `answered by ${entry.tool}`),
+    );
+    detail.append(meta);
+    const answer = el("div", "hist-answer" + (entry.ok ? "" : " error"));
+    if (entry.ok && entry.tool === "correlated_telemetry_report") renderFiguresAndNarration(answer, entry.answer);
+    else answer.textContent = entry.answer;
+    detail.append(answer);
+    back.focus();
+  }
+
   // ---------- startup ----------
   async function init() {
     const result = await api("/api/tools");
@@ -559,6 +756,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     refreshStatus();
     refreshSimulators();
     setInterval(() => { if (!document.hidden) { refreshStatus(); refreshSimulators(); } }, 5000);
+    setInterval(() => { if (!document.hidden) refreshHistory(); }, 10000);
   }
   init();
 })();

@@ -28,3 +28,6 @@ Kumbia.iml
 /httpRequests/
 data/assistant/cache.jsonl
 data/telemetry/canonical_records.jsonl
+data/history/
+data/assistant/memory.jsonl
+power_telemetry.sqlite

@@ -6,13 +6,18 @@
    call or resource read; nothing here imports Kumbia's own code. Also starts
    and stops the telemetry simulators, so the whole demo runs from one window.
 
+   Every tool call and simulator action, from any visitor, is recorded in the
+   history store (history.py) with the visitor's IP; /api/history lists it
+   for the page's History tab, which everyone can see.
+
    Usage:
        .venv/bin/python tools/demo_ui/server.py            # then open http://localhost:8000
        .venv/bin/python tools/demo_ui/server.py --host 19.51.0.74 --port 8080
 
    Listens on 127.0.0.1 unless --host names an interface address (or 0.0.0.0
    for all). There is no auth: anyone who can reach that address can chat,
-   spend API credits, and start/stop the simulators. Stopping it (Ctrl+C)
+   spend API credits, start/stop the simulators, and read every visitor's
+   history. Stopping it (Ctrl+C)
    stops collection first, so an in-flight cycle finishes writing, then stops
    the simulators.
    """
@@ -21,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import uvicorn
@@ -36,7 +42,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "mcp_client"))
 
 from dev_client import SERVER_PARAMS  # noqa: E402  (one definition of how to launch the server)
+from history import HistoryStore  # noqa: E402
 from simulators import SimulatorManager  # noqa: E402
+
+HISTORY_PATH = HERE.parents[1] / "data" / "history" / "history.jsonl"
 
 STATUS_URI = "telemetry://collection-status"
 
@@ -51,6 +60,7 @@ async def lifespan(app: Starlette):
         app.state.session = session
         app.state.tools = {tool.name for tool in (await session.list_tools()).tools}
         app.state.simulators = SimulatorManager()
+        app.state.history = HistoryStore(HISTORY_PATH)
         try:
             yield
         finally:
@@ -66,16 +76,34 @@ def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
-async def _call_tool(request: Request, name: str, arguments: dict) -> JSONResponse:
+def _visitor(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _record(request: Request, kind: str, tool: str, prompt: str, answer: str, ok: bool) -> None:
+    request.app.state.history.record(
+        who=_visitor(request), kind=kind, tool=tool, prompt=prompt, answer=answer, ok=ok,
+    )
+
+
+async def _call_tool(request: Request, name: str, arguments: dict, kind: str, prompt: str) -> JSONResponse:
+    """One MCP tool call, recorded in history (success or failure) as kind/prompt."""
     if name not in request.app.state.tools:
-        return _error(404, f"The Kumbia server didn't register {name}; check its data source is configured.")
+        message = f"The Kumbia server didn't register {name}; check its data source is configured."
+        _record(request, kind, name, prompt, message, ok=False)
+        return _error(404, message)
     try:
         result = await request.app.state.session.call_tool(name, arguments=arguments)
     except Exception as error:  # transport-level failure: report it instead of a blank 500
-        return _error(502, f"{name} failed: {error}")
+        message = f"{name} failed: {error}"
+        _record(request, kind, name, prompt, message, ok=False)
+        return _error(502, message)
     text = "\n".join(block.text for block in result.content if hasattr(block, "text"))
     if result.is_error:
-        return _error(502, text or f"{name} failed.")
+        message = text or f"{name} failed."
+        _record(request, kind, name, prompt, message, ok=False)
+        return _error(502, message)
+    _record(request, kind, name, prompt, text, ok=True)
     return JSONResponse({"text": text})
 
 
@@ -117,46 +145,46 @@ async def chat(request: Request) -> JSONResponse:
     text = _required_text(await _json_body(request), "text")
     if text is None:
         return _error(400, "Type a message first.")
-    return await _call_tool(request, "answer_question", {"text": text})
+    return await _call_tool(request, "answer_question", {"text": text}, "chat", text)
 
 
 async def remember(request: Request) -> JSONResponse:
     fact = _required_text(await _json_body(request), "fact")
     if fact is None:
         return _error(400, "Type the fact to remember first.")
-    return await _call_tool(request, "remember", {"fact": fact})
+    return await _call_tool(request, "remember", {"fact": fact}, "remember", f"Remember: {fact}")
 
 
 async def web_search(request: Request) -> JSONResponse:
     query = _required_text(await _json_body(request), "query")
     if query is None:
         return _error(400, "Type what to search for first.")
-    return await _call_tool(request, "web_search", {"query": query})
+    return await _call_tool(request, "web_search", {"query": query}, "web_search", f"Search the web: {query}")
 
 
 async def network_report(request: Request) -> JSONResponse:
     body = await _json_body(request)
     # index scope comes from the server's NETWORK_ES_INDEX_PATTERN, not from here
-    return await _call_tool(request, "network_activity_report", {
-        "hours_back": max(1, _int(body, "hours_back", 24)),
-    })
+    hours = max(1, _int(body, "hours_back", 24))
+    return await _call_tool(request, "network_activity_report", {"hours_back": hours},
+                            "report", f"Network activity report, last {hours} hour(s)")
 
 
 async def power(request: Request) -> JSONResponse:
     body = await _json_body(request)
     question = _required_text(body, "question") or "What was the most recent power reading for R42-U18?"
-    return await _call_tool(request, "power_telemetry_report", {"question": question, "limit": _int(body, "limit",
-                                                                                                    5)})
+    return await _call_tool(request, "power_telemetry_report", {"question": question, "limit": _int(body, "limit", 5)},
+                            "power", question)
 
 
 # ---------- telemetry ----------
 
 async def telemetry_start(request: Request) -> JSONResponse:
-    return await _call_tool(request, "start_telemetry_collection", {})
+    return await _call_tool(request, "start_telemetry_collection", {}, "telemetry", "Start telemetry collection")
 
 
 async def telemetry_stop(request: Request) -> JSONResponse:
-    return await _call_tool(request, "stop_telemetry_collection", {})
+    return await _call_tool(request, "stop_telemetry_collection", {}, "telemetry", "Stop telemetry collection")
 
 
 async def telemetry_status(request: Request) -> JSONResponse:
@@ -181,8 +209,8 @@ async def telemetry_ask(request: Request) -> JSONResponse:
     question = _required_text(body, "question")
     if question is None:
         return _error(400, "Type a question about the telemetry first.")
-    return await _call_tool(request, "correlated_telemetry_report", {"question": question, "limit": _int(body,
-                                                                                                         "limit", 60)})
+    return await _call_tool(request, "correlated_telemetry_report", {"question": question, "limit": _int(body, "limit", 60)},
+                            "telemetry", question)
 
 
 # ---------- simulators ----------
@@ -207,7 +235,25 @@ async def simulator_action(request: Request) -> JSONResponse:
             return _error(404, f"Unknown action {action!r}; use start or stop.")
     except ValueError as error:
         return _error(404, str(error))
+    _record(request, "simulator", f"{name} simulator", f"{action.capitalize()} the {name} simulator",
+            f"{name.capitalize()} simulator {'started' if action == 'start' else 'stopped'}.", ok=True)
     return JSONResponse({"simulators": _simulator_list(manager)})
+
+
+# ---------- history ----------
+
+async def history_list(request: Request) -> JSONResponse:
+    """Newest-first summaries (no full answers), paged with ?before=<id>&limit=N; also says who is asking."""
+    limit = max(1, min(_int(dict(request.query_params), "limit", 50), 200))
+    entries, more = request.app.state.history.page(limit, request.query_params.get("before") or None)
+    return JSONResponse({"entries": [e.summary() for e in entries], "more": more, "viewer": _visitor(request)})
+
+
+async def history_entry(request: Request) -> JSONResponse:
+    entry = request.app.state.history.get(request.path_params["entry_id"])
+    if entry is None:
+        return _error(404, "That history entry doesn't exist.")
+    return JSONResponse(asdict(entry))
 
 
 app = Starlette(
@@ -225,6 +271,8 @@ app = Starlette(
         Route("/api/telemetry/ask", telemetry_ask, methods=["POST"]),
         Route("/api/simulators", simulators),
         Route("/api/simulators/{name}/{action}", simulator_action, methods=["POST"]),
+        Route("/api/history", history_list),
+        Route("/api/history/{entry_id}", history_entry),
     ],
     lifespan=lifespan,
 )
