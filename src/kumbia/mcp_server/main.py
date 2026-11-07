@@ -251,8 +251,13 @@ TELEMETRY_POWER_OUTLET = "R42-U18"     # matches scratch_power_seed.py / the pow
 
 telemetry_bucket_minutes = int(os.environ.get("TELEMETRY_BUCKET_MINUTES", "5"))
 telemetry_poll_interval_seconds = float(os.environ.get("TELEMETRY_POLL_INTERVAL_SECONDS", "300"))
+# The network stream reads the same real index and fields as network_monitoring
+# unless overridden. The host field must hold ONE IP per event (source.ip,
+# host.ip), never a multi-valued one like related.ip: the composite query's
+# bucket budget assumes one bucket per (host, time bucket).
 telemetry_network_host_ip = os.environ.get("TELEMETRY_NETWORK_HOST_IP")
-telemetry_es_index_pattern = os.environ.get("TELEMETRY_ES_INDEX_PATTERN", "network-activity-*")
+telemetry_es_index_pattern = os.environ.get("TELEMETRY_ES_INDEX_PATTERN", network_index_pattern)
+telemetry_network_host_field = os.environ.get("TELEMETRY_NETWORK_HOST_FIELD", network_host_field)
 telemetry_network_enabled = bool(elasticsearch_url and telemetry_network_host_ip)
 telemetry_compute_instance = os.environ.get("TELEMETRY_COMPUTE_INSTANCE")
 telemetry_compute_enabled = bool(prometheus_url and telemetry_compute_instance)
@@ -311,6 +316,7 @@ if power_telemetry_db_path.exists():
             (lambda window: es_network_window(
                 elasticsearch_url, telemetry_es_index_pattern, window,
                 [telemetry_network_host_ip], telemetry_bucket_minutes, elasticsearch_credentials,
+                host_field=telemetry_network_host_field, timestamp_field=network_timestamp_field,
             ))
             if telemetry_network_enabled
             else (lambda window: SourceQuery(address="unconfigured"))

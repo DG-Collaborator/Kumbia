@@ -27,4 +27,4 @@ Kumbia.iml
 # Editor-based HTTP Client requests
 /httpRequests/
 data/assistant/cache.jsonl
-
+data/telemetry/canonical_records.jsonl

@@ -7,9 +7,15 @@
    top candidates have. Prints field names and types only, never document
    values, so its output is safe to paste into a chat.
 
+   With --host IP, instead checks whether one machine appears in the traffic
+   (as source, and on either side, over the last hour and day) and lists the
+   busiest source IPs in its /16, to pick a TELEMETRY_NETWORK_HOST_IP the
+   tap actually sees.
+
    Usage:
        .venv/bin/python tools/es_probe.py                       # list indices
-       .venv/bin/python tools/es_probe.py "logs-gigamon.ami*"   # fields of a pattern
+       .venv/bin/python tools/es_probe.py "logs-gigamon.ami-*"  # fields of a pattern
+       .venv/bin/python tools/es_probe.py "logs-gigamon.ami-*" --host 10.20.0.241
 """
 from __future__ import annotations
 
@@ -46,6 +52,10 @@ def main() -> None:
             return
         pattern = sys.argv[1]
 
+        if len(sys.argv) >= 4 and sys.argv[2] == "--host":
+            _probe_host(client, base, pattern, sys.argv[3], timestamp_field)
+            return
+
         newest = client.post(f"{base}/{pattern}/_search", json={
             "size": 0, "aggs": {"newest": {"max": {"field": timestamp_field}},
                                 "oldest": {"min": {"field": timestamp_field}}},
@@ -79,6 +89,37 @@ def main() -> None:
             value = response.json().get("aggregations", {}).get("distinct", {}).get("value") \
                 if response.is_success else f"error {response.status_code}"
             print(f"  {name}: {value}")
+
+
+def _probe_host(client: httpx.Client, base: str, pattern: str, ip: str, timestamp_field: str) -> None:
+    host_field = os.environ.get("NETWORK_HOST_FIELD", "source.ip")
+    print(f"\nHost {ip} in {pattern}:")
+    for field_name in (host_field, "related.ip"):
+        for window in ("now-1h", "now-24h"):
+            response = client.post(f"{base}/{pattern}/_count", json={"query": {"bool": {"filter": [
+                {"term": {field_name: ip}}, {"range": {timestamp_field: {"gte": window}}},
+            ]}}})
+            count = response.json().get("count") if response.is_success else f"error {response.status_code}"
+            side = "as source" if field_name == host_field else "either side"
+            print(f"  {side:<12} ({field_name}), since {window}: {count}")
+
+    subnet = ".".join(ip.split(".")[:2]) + ".0.0/16"
+    response = client.post(f"{base}/{pattern}/_search", json={
+        "size": 0,
+        "query": {"bool": {"filter": [
+            {"term": {host_field: subnet}}, {"range": {timestamp_field: {"gte": "now-24h"}}},
+        ]}},
+        "aggs": {"ips": {"terms": {"field": host_field, "size": 15}}},
+    })
+    print(f"\nBusiest {host_field} values in {subnet}, last 24h:")
+    if not response.is_success:
+        print(f"  error {response.status_code}: {response.text[:300]}")
+        return
+    buckets = response.json().get("aggregations", {}).get("ips", {}).get("buckets", [])
+    if not buckets:
+        print("  none: the tap sees no traffic from this subnet")
+    for bucket in buckets:
+        print(f"  {bucket['key']}: {bucket['doc_count']} events")
 
 
 def _flatten(properties: dict, prefix: str, out: dict[str, str]) -> None:

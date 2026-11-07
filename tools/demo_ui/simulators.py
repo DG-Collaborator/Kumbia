@@ -17,9 +17,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Only power is simulated: network telemetry comes from the real Elasticsearch
+# index. tools/telemetry_sim/network_simulator.py still exists for offline
+# demos and can be run by hand.
 SIMULATOR_SCRIPTS = {
     "power": REPO_ROOT / "tools" / "telemetry_sim" / "power_simulator.py",
-    "network": REPO_ROOT / "tools" / "telemetry_sim" / "network_simulator.py",
 }
 
 _STOP_TIMEOUT_SECONDS = 5.0
