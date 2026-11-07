@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass, replace
 
 from kumbia.core.source.data_source import DataSource
@@ -452,11 +453,19 @@ def _metric_text(hours_back: int, index_pattern: str, report: MetricReport,
         f"Minimum: {_num(s.low)}",
         f"Maximum: {_num(s.high)}",
         f"95th percentile: {_num(s.p95)}",
-        "Top hosts by total:",
-        *(_metric_host_line(h, labels) for h in report.top_by_total),
-        "Top hosts by average:",
-        *(_metric_host_line(h, labels) for h in report.top_by_mean),
     ]
+    if report.top_by_total or report.top_by_mean:
+        lines += [
+            "Top hosts by total:",
+            *(_metric_host_line(h, labels) for h in report.top_by_total),
+            "Top hosts by average:",
+            *(_metric_host_line(h, labels) for h in report.top_by_mean),
+        ]
+    else:
+        lines.append(
+            "Top hosts: none — the records carrying this metric have no host address, "
+            "so it can't be attributed to individual hosts"
+        )
     peak_total, peak_mean, low_mean = report.peak_total_bucket, report.peak_mean_bucket, report.low_mean_bucket
     if peak_total is not None:
         lines.append(f"Highest-total {report.interval} bucket: {peak_total.timestamp} (total {_num(peak_total.total)})")
@@ -471,12 +480,19 @@ def _metric_host_line(host, labels: dict[str, str] | None) -> str:
 
 
 def _num(value: float | None) -> str:
-    """Whole numbers with thousands separators; fractions to 3 significant decimals; None as 'n/a'."""
+    """
+       Whole numbers with thousands separators; values of 1 or more to 3
+       decimals; values below 1 to 4 significant digits (0.000324, never a
+       misleading "0"); None as "n/a". Never scientific notation.
+    """
     if value is None:
         return "n/a"
     if float(value).is_integer():
         return f"{int(value):,}"
-    return f"{value:,.3f}".rstrip("0").rstrip(".")
+    if abs(value) >= 1:
+        return f"{value:,.3f}".rstrip("0").rstrip(".")
+    decimals = min(12, max(3, -math.floor(math.log10(abs(value))) + 3))
+    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
 
 
 def _profile_text(hours_back: int, index_pattern: str, profile: HostProfile, fields: FieldMapping,

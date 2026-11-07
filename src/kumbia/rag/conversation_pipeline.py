@@ -71,11 +71,15 @@ _NARRATION_INSTRUCTIONS = (
 _ROUTING_INSTRUCTIONS = (
     "You decide whether a user's message needs one of the data skills listed "
     "below. Reply with exactly one skill name from the list when the message asks "
-    "about that skill's data. Reply with none if the message is small talk, about "
-    "this conversation, or about something the user asked you to remember. Reply "
-    "with unavailable if the message asks for data (metrics, readings, hosts, "
-    "events, logs, figures) that none of the listed skills provides. Reply with "
-    "the single word only, no other words."
+    "about that skill's data. A request in different units or wording (megabytes "
+    "instead of bytes, milliseconds instead of seconds, 'traffic' instead of "
+    "events) still goes to the skill that holds that measure. Reply with none if "
+    "the message is small talk, about this conversation, about something the user "
+    "asked you to remember, or asks what an earlier answer or report said (for "
+    "example 'what did the last report say'). Reply with unavailable only if the "
+    "message asks for data (metrics, readings, hosts, events, logs, figures) that "
+    "none of the listed skills measures in any unit. Reply with the single word "
+    "only, no other words."
 )
 
 _ROUTING_HISTORY_TURNS = 4
@@ -343,8 +347,7 @@ class ConversationPipeline:
     def _available_data_hint(self) -> str:
         if not self._skills:
             return "No data sources are connected right now."
-        listed = ", ".join(name.replace("_", " ") for name in self._skills)
-        return f"I can answer from: {listed}."
+        return f"I can answer from: {_grouped_skill_names(list(self._skills))}."
 
     async def _route(self, text: str) -> tuple[Skill | None, bool]:
         """
@@ -375,6 +378,29 @@ class ConversationPipeline:
 
     def reset(self) -> None:
         self._history.clear()
+
+
+def _grouped_skill_names(names: list[str], min_group: int = 3) -> str:
+    """
+       Skill names as readable text, with families that share their first two
+       words collapsed: network_metric_bytes_out, network_metric_tcp_rtt, ...
+       -> "network metric (bytes out, tcp rtt, ...)". Families smaller than
+       min_group are listed in full. Order of first appearance is kept.
+    """
+    families: dict[str, list[str]] = {}
+    for name in names:
+        parts = name.split("_")
+        key = "_".join(parts[:2]) if len(parts) > 2 else name
+        families.setdefault(key, []).append(name)
+
+    listed: list[str] = []
+    for key, members in families.items():
+        if len(members) >= min_group:
+            tails = ", ".join(member[len(key) + 1:].replace("_", " ") for member in members)
+            listed.append(f"{key.replace('_', ' ')} ({tails})")
+        else:
+            listed.extend(member.replace("_", " ") for member in members)
+    return ", ".join(listed)
 
 
 def _labeled(text: str, source: str, created_at: str) -> str:
