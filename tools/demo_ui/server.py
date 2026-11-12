@@ -209,8 +209,10 @@ async def telemetry_ask(request: Request) -> JSONResponse:
     question = _required_text(body, "question")
     if question is None:
         return _error(400, "Type a question about the telemetry first.")
-    return await _call_tool(request, "correlated_telemetry_report", {"question": question, "limit": _int(body, "limit", 60)},
-                            "telemetry", question)
+    arguments = {"question": question}
+    if body.get("hours_back") is not None:
+        arguments["hours_back"] = max(1, _int(body, "hours_back", 24))
+    return await _call_tool(request, "correlated_telemetry_report", arguments, "telemetry", question)
 
 
 # ---------- simulators ----------

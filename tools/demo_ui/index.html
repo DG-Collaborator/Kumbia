@@ -453,11 +453,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   }
 
   // correlated_telemetry_report returns "<figures>\n\n<narration>"; figures are the
-  // leading paragraphs that start with "Asset " (one per asset).
+  // leading paragraphs: the "Window: " line, then one starting "Asset " per asset.
   function renderFiguresAndNarration(bubble, text) {
     const paragraphs = text.split("\n\n");
     const figures = [];
-    while (paragraphs.length && paragraphs[0].startsWith("Asset ")) figures.push(paragraphs.shift());
+    while (paragraphs.length && /^(Window: |Asset )/.test(paragraphs[0])) figures.push(paragraphs.shift());
     if (!figures.length) { bubble.textContent = text; return; }
     bubble.textContent = "";
     const wrap = document.createElement("div");

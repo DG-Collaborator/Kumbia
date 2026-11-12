@@ -72,6 +72,7 @@ class Correlation:
 @dataclass(frozen=True)
 class AssetSummary:
     asset_id: str
+    sources: list[str]
     bucket_count: int
     first_bucket: str
     last_bucket: str
@@ -83,9 +84,12 @@ def summarize(
         table: DataTable,
         timestamp_column: str = "timestamp",
         asset_column: str = "asset_id",
+        source_column: str = "source_system",
 ) -> list[AssetSummary]:
     """One AssetSummary per asset in the table, assets in sorted order."""
-    metric_columns = [c.key for c in table.columns if c.key not in (timestamp_column, asset_column)]
+    metric_columns = [
+        c.key for c in table.columns if c.key not in (timestamp_column, asset_column, source_column)
+    ]
 
     rows_by_asset: dict[str, list[DataRow]] = {}
     for row in table.rows:
@@ -108,8 +112,12 @@ def summarize(
             if readings:
                 series[column] = readings
 
+        sources = sorted({
+            part for row in rows for part in row.value(source_column).split("+") if part
+        })
         summaries.append(AssetSummary(
             asset_id=asset_id,
+            sources=sources,
             bucket_count=len(buckets),
             first_bucket=buckets[0],
             last_bucket=buckets[-1],
@@ -117,12 +125,18 @@ def summarize(
             correlations=[_correlation(a, series[a], b, series[b]) for a, b in combinations(series, 2)],
         ))
     return summaries
-def summary_text(table: DataTable) -> str:
-    """The figures as plain text — what a model is given to narrate, and what the user sees alongside it."""
+def summary_text(table: DataTable, header: str | None = None) -> str:
+    """
+       The figures as plain text — what a model is given to narrate, and what
+       the user sees alongside it. header (e.g. the window that was read) is
+       its own first paragraph when given.
+    """
     summaries = summarize(table)
-    if not summaries:
-        return "No correlated telemetry records to summarize."
-    return "\n\n".join(_asset_text(summary) for summary in summaries)
+    body = (
+        "\n\n".join(_asset_text(summary) for summary in summaries)
+        if summaries else "No correlated telemetry records to summarize."
+    )
+    return f"{header}\n\n{body}" if header else body
 
 
 def _metric_summary(metric: str, readings: list[Reading]) -> MetricSummary:
@@ -144,8 +158,6 @@ def _correlation(metric_a: str, readings_a: list[Reading], metric_b: str, readin
     coefficient = None
     if len(shared) >= _MIN_CORRELATION_SAMPLES:
         coefficient = _pearson([values_a[t] for t in shared], [values_b[t] for t in shared])
-    if len(shared) >= _MIN_CORRELATION_SAMPLES:
-        coefficient = _pearson([values_a[t] for t in shared], [values_b[t] for t in shared])
     return Correlation(metric_a, metric_b, len(shared), coefficient)
 
 
@@ -163,6 +175,7 @@ def _asset_text(summary: AssetSummary) -> str:
     lines = [
         f"Asset {summary.asset_id}: {summary.bucket_count} time bucket(s), "
         f"first {summary.first_bucket}, last {summary.last_bucket}"
+        + (f"; sources: {', '.join(summary.sources)}" if summary.sources else "")
     ]
     for m in summary.metrics:
         percent = f" ({m.percent_change:+.1f}%)" if m.percent_change is not None else ""

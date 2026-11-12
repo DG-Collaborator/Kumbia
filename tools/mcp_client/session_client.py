@@ -3,7 +3,8 @@
     background collector dies with that server. Within a single session it
     starts telemetry collection, watches telemetry://collection-status as
     records accumulate, asks the assistant's correlated_telemetry_report a
-    question over what was collected, then stops collection. Not shipped in
+    question (which reads its window live from the sources, so it doesn't
+    depend on the collection), then stops collection. Not shipped in
     the installable package (lives outside src/), same as dev_client.py.
 
     Start the simulators first, each in its own terminal, so there is live
@@ -33,7 +34,7 @@ DEFAULT_QUESTION = (
 )
 
 
-async def run(watch_minutes: float, status_every_seconds: float, question: str, limit: int) -> None:
+async def run(watch_minutes: float, status_every_seconds: float, question: str, hours_back: int) -> None:
     async with stdio_client(SERVER_PARAMS) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -57,7 +58,7 @@ async def run(watch_minutes: float, status_every_seconds: float, question: str, 
                     await asyncio.sleep(min(status_every_seconds, remaining))
 
                 print(f"\nAsking the assistant: {question}\n")
-                print(await _call(session, "correlated_telemetry_report", {"question": question, "limit": limit}))
+                print(await _call(session, "correlated_telemetry_report", {"question": question, "hours_back": hours_back}))
             finally:
                 print()
                 print(await _call(session, "stop_telemetry_collection"))
@@ -80,9 +81,10 @@ def main() -> None:
                         help="how long to let collection run before asking the question")
     parser.add_argument("--status-every-seconds", type=float, default=30.0)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
-    parser.add_argument("--limit", type=int, default=20, help="newest correlated records to ground the answer in (max 60)")
+    parser.add_argument("--hours-back", type=int, default=1,
+                        help="trailing window the answer is computed over (read live from the sources)")
     args = parser.parse_args()
-    asyncio.run(run(args.watch_minutes, args.status_every_seconds, args.question, args.limit))
+    asyncio.run(run(args.watch_minutes, args.status_every_seconds, args.question, args.hours_back))
 
 
 if __name__ == "__main__":

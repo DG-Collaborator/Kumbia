@@ -51,12 +51,36 @@ generic source improvements listed below.
   particular telemetry system, and it stays LLM-free by design
   (narration/reasoning is a persona's job, not this shared layer's).
 - **`stream_queries.py`** — builds each stream's `SourceQuery` for one
-  half-open `[start, end)` `TimeWindow`: `sql_power_window` (sqlite, ISO
-  text timestamps) and `es_network_window` (an Elasticsearch composite
-  aggregation of event counts per host per bucket, filtered to registered
-  IPs, refusing any window that could exceed one page of buckets). Only
-  code-supplied values reach query text: windows are real datetimes, SQL
-  identifiers are validated, IPs come from the registry.
+  half-open `[start, end)` `TimeWindow` and bucket size: `sql_power_buckets`
+  (sqlite, ISO text timestamps, one averaged row per outlet per bucket with
+  min/max/count), `es_network_window` (an Elasticsearch composite
+  aggregation of event counts per host per bucket, plus optional per-bucket
+  sums/averages of configured network metrics such as bytes, filtered to
+  registered IPs, refusing any window that could exceed one page of
+  buckets), and `prometheus_compute_window`. `plan_window()` turns "the last
+  N hours" into a window of closed buckets with a bucket size coarse enough
+  to stay within those limits. Only code-supplied values reach query text:
+  windows are real datetimes, SQL identifiers are validated, outlets/IPs
+  come from the registry.
+- **`collector.py`** — `TelemetryCollector`, continuous collection into the
+  canonical store (`canonical_record_store.py`), started/stopped by MCP tools.
+- **`window_source.py`** — `CorrelatedWindowSource`, the same pipeline and
+  query builders run on demand for any trailing window, exposed as a
+  `DataSource`. This is what the assistant's `correlated_telemetry_report`
+  reads, so "the past 24 hours" works whether or not collection ran.
+- **`analysis.py`** — descriptive figures over correlated records (start/end,
+  change, peak/low, Pearson correlation of every metric pair).
+- **`power_report.py`** — power consumption figures over a window (average,
+  highest/lowest reading, change, coverage, energy in kWh, system total),
+  read by the assistant's `power_consumption_report`.
+
+The asset registry is a JSON file, `data/telemetry/assets.json` (gitignored;
+copy `assets.example.json`), loaded by `load_asset_registry()`. Every query
+builder takes the registry's list of identities, so one asset and many run
+the same code; a CMDB/DCIM-backed loader later only has to produce the same
+dict. Configuration-dependent readings (network bytes, RTT, ...) travel in
+`CanonicalRecord.extra_readings` (via `SourceMapping.extra_columns`) and are
+stored flat beside the named fields.
 
 Supporting pieces live elsewhere, in their existing seams rather than here,
 because they're general-purpose fetch mechanisms with no telemetry- or
@@ -70,9 +94,12 @@ correlation-specific knowledge:
 - **`core/source/elasticsearch_data_source.py`** — flattens composite
   aggregation keys into `key.<source>` columns, which is what lets the
   network stream's `key.host` / `key.ts` be read like any other column.
-- **`scratch_power_seed.py`** (repo root) — throwaway script seeding
-  synthetic power data into a local sqlite file for standalone verification;
-  not a seam file, safe to delete/rerun.
+- **`tools/telemetry_sim/power_backfill.py`** — fills the power sqlite with
+  synthetic history for every registered outlet (rerunnable, only fills
+  gaps); `power_simulator.py` keeps it live. The data is synthetic and is
+  labeled with `POWER_TELEMETRY_SOURCE_SYSTEM` in every answer: until a real
+  power source (PDU, or Prometheus RAPL/IPMI exporters) replaces it, any
+  relationship it shows with real network traffic is coincidence.
 
 ## Why this is still a basic/minimal-scope layer
 
@@ -80,15 +107,14 @@ Every gap below is a deliberate scoping decision, not an oversight — each was
 left out so the join mechanism itself could be proven before adding anything
 that has no consumer yet.
 
-- **Network is event counts only.** The network stream carries
-  `network_event_count` (documents per host per bucket), not throughput or
-  bytes — the current index has no byte fields. Metrics like GB/kWh need a
-  source that reports bytes.
-- **Last reading wins within a bucket.** Multiple readings from one stream
-  in the same `(asset_id, bucket)` aren't averaged or summed; the last one
-  processed is kept. Fine for pre-aggregated sources (Elasticsearch returns
-  one row per bucket) and one-reading-per-bucket feeds, but not yet the
-  time-window averaging the FBA doc describes.
+- **Network metrics are whatever is configured.** The network stream always
+  carries `network_event_count`, plus the `TELEMETRY_NETWORK_METRICS` it is
+  given (bytes, RTT, ... from `NETWORK_METRIC_FIELDS`). No derived ratios
+  (GB/kWh) yet.
+- **Streams are expected to arrive pre-aggregated per bucket.** Power is
+  averaged in SQL, network and compute in their own query languages; the
+  engine itself still keeps the last reading if a stream sends several for
+  one `(asset_id, bucket)`.
 - **No workload/business identity layer.** The collaborator's model treats
   "which workload/application/customer caused this consumption" as a
   *second* correlation layer built on top of the asset-level one. Kumbia's
@@ -99,9 +125,8 @@ that has no consumer yet.
   only. None of the collaborator's suggested metrics (kWh/GPU-hour,
   watts/server idle-vs-load, compute-per-watt, stranded capacity,
   idle-power cost, etc.) are computed anywhere yet.
-- **`AssetRegistry` is a seeded in-memory map**, not backed by a real
-  CMDB/DCIM identity source. Every mapping used so far has been written by
-  hand for testing.
+- **`AssetRegistry` is seeded from a hand-written JSON file**, not a real
+  CMDB/DCIM identity source.
 - **`Confidence` and `Data_Quality`** (fields the collaborator's canonical
   record includes) were left off `CanonicalRecord` entirely for v1.
 - **The compute connector is unverified against a real system.**
@@ -109,10 +134,6 @@ that has no consumer yet.
   hand-written Prometheus-API-shaped JSON — there's no Prometheus/
   node_exporter reachable from the machine this was built on, so the
   compute stream currently runs on `EmptyDataSource`.
-- **No persona consumes this yet.** Nothing in `network_monitoring` (or any
-  other persona) calls into `telemetry/`, and no MCP tools expose it. That
-  wiring is planned as a distinct next step, after this layer is fully
-  verified standalone.
 - **No RAG-side static knowledge is wired in.** Vendor spec sheets, thermal
   design guides, and tariff documents — the kind of content the
   collaborator's feedback says belongs in RAG rather than here — aren't

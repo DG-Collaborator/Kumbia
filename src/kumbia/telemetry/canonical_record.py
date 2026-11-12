@@ -6,10 +6,15 @@
      asset_id, and source_system are guaranteed; every reading is optional
      since a given window may only have power data, only compute data, or
      both.
+
+     The named reading fields are the ones every deployment shares.
+     extra_readings holds the rest, keyed by name — readings whose set depends
+     on configuration (which network metrics an index carries, which vendor
+     counters a device exposes), so adding one never needs an edit here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -26,3 +31,4 @@ class CanonicalRecord:
     gpu_utilization: float | None = None
     memory_utilization: float | None = None
     network_event_count: float | None = None
+    extra_readings: dict[str, float] = field(default_factory=dict)

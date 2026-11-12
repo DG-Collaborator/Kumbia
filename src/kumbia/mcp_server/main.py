@@ -16,7 +16,6 @@ from mcp.server.mcpserver import MCPServer
 from kumbia.core.net.http_client import create_http_client
 from kumbia.core.source.elasticsearch_data_source import ElasticsearchDataSource
 from kumbia.core.source.empty_data_source import EmptyDataSource
-from kumbia.core.source.jsonl_table_source import JsonlTableSource
 from kumbia.core.source.prometheus_data_source import PrometheusDataSource
 from kumbia.core.source.source_query import Credentials, SourceQuery
 from kumbia.core.source.sql_data_source import SqlDataSource
@@ -25,6 +24,7 @@ from kumbia.mcp_server.personas.assistant.tools import (
     register_assistant_tools,
     register_assistant_resources,
     register_correlated_telemetry_tool,
+    register_power_consumption_tool,
     register_power_telemetry_tool,
     register_web_search_tool,
 )
@@ -41,11 +41,18 @@ from kumbia.rag.conversation_pipeline import ConversationPipeline
 from kumbia.rag.persona_profile import PersonaProfile
 from kumbia.rag.personas.network_monitoring.pipeline import NetworkActivityPipeline
 from kumbia.rag.personas.network_monitoring.queries import DEFAULT_FIELD_MAPPING, FieldMapping
-from kumbia.telemetry.asset_registry import AssetRegistry
+from kumbia.telemetry.asset_registry import AssetRegistry, load_asset_registry
 from kumbia.telemetry.collector import TelemetryCollector
 from kumbia.telemetry.correlation_engine import SourceMapping
 from kumbia.telemetry.pipeline import TelemetryCorrelationPipeline, TelemetryStream
-from kumbia.telemetry.stream_queries import es_network_window, prometheus_compute_window, sql_power_window
+from kumbia.telemetry.stream_queries import (
+    NetworkMetric,
+    TimeWindow,
+    es_network_window,
+    prometheus_compute_window,
+    sql_power_buckets,
+)
+from kumbia.telemetry.window_source import CorrelatedWindowSource
 
 load_dotenv()
 
@@ -192,7 +199,173 @@ elif assistant_llm_provider == "openai":
 else:
     raise ValueError(f"ASSISTANT_LLM_PROVIDER must be 'ollama' or 'openai', got: {assistant_llm_provider!r}")
 
-_assistant_data_dir = Path(__file__).resolve().parents[3] / "data" / "assistant"
+_repo_root = Path(__file__).resolve().parents[3]
+
+
+# --- platform: telemetry correlation ------------------------------------
+# Shared infrastructure, not owned by any persona: one asset registry, one
+# correlation pipeline over power, compute, and network streams, and two
+# ways to read it — a background collector feeding the canonical store, and
+# an on-demand window source the assistant reads for any trailing window.
+# Every stream always exists — backed by its real system when configured,
+# otherwise by EmptyDataSource — so the pipeline's shape never depends on
+# which env vars happen to be set. Registers no-op unless the power
+# telemetry db exists (create it with tools/telemetry_sim/power_backfill.py).
+# Code defaults are production cadence (5-min buckets, 300s poll); demo
+# cadence is set in .env.
+power_telemetry_db_path = Path(
+    os.environ.get("POWER_TELEMETRY_DB_PATH", str(_repo_root / "power_telemetry.sqlite"))
+)
+power_telemetry_source_system = os.environ.get("POWER_TELEMETRY_SOURCE_SYSTEM", "synthetic_dcim")
+telemetry_store_path = Path(os.environ.get(
+    "TELEMETRY_STORE_PATH", str(_repo_root / "data" / "telemetry" / "canonical_records.jsonl")
+))
+telemetry_assets_path = Path(os.environ.get(
+    "TELEMETRY_ASSETS_PATH", str(_repo_root / "data" / "telemetry" / "assets.json")
+))
+
+# Fallback registry when TELEMETRY_ASSETS_PATH doesn't exist: the single demo
+# asset, its network IP and compute instance taken from the env vars below.
+TELEMETRY_ASSET_ID = "FBA-1"
+TELEMETRY_POWER_OUTLET = "R42-U18"     # the power simulator's / backfill's default outlet
+
+telemetry_bucket_minutes = int(os.environ.get("TELEMETRY_BUCKET_MINUTES", "5"))
+telemetry_poll_interval_seconds = float(os.environ.get("TELEMETRY_POLL_INTERVAL_SECONDS", "300"))
+# The network stream reads the same real index and fields as network_monitoring
+# unless overridden. The host field must hold ONE IP per event (source.ip,
+# host.ip), never a multi-valued one like related.ip: the composite query's
+# bucket budget assumes one bucket per (host, time bucket).
+telemetry_es_index_pattern = os.environ.get("TELEMETRY_ES_INDEX_PATTERN", network_index_pattern)
+telemetry_network_host_field = os.environ.get("TELEMETRY_NETWORK_HOST_FIELD", network_host_field)
+
+
+def _telemetry_network_metrics(raw: str) -> dict[str, NetworkMetric]:
+    """
+       TELEMETRY_NETWORK_METRICS: "alias[:sum|avg|max],..." over the aliases in
+       NETWORK_METRIC_FIELDS -> {extra reading name: NetworkMetric}, e.g.
+       "bytes_out,tcp_rtt:avg" -> network_bytes_out_sum, network_tcp_rtt_avg.
+    """
+    metrics: dict[str, NetworkMetric] = {}
+    for entry in filter(None, (part.strip().lower() for part in raw.split(","))):
+        alias, _, aggregation = entry.partition(":")
+        aggregation = aggregation or "sum"
+        if alias not in network_metrics:
+            raise ValueError(
+                f"TELEMETRY_NETWORK_METRICS names {alias!r}, which isn't in NETWORK_METRIC_FIELDS "
+                f"({', '.join(sorted(network_metrics)) or 'empty'})."
+            )
+        metrics[f"network_{alias}_{aggregation}"] = NetworkMetric(network_metrics[alias], aggregation)
+    return metrics
+
+
+# Network metrics carried per bucket beside the event count; defaults to the
+# metrics every network report totals (NETWORK_REPORT_METRICS).
+telemetry_network_metrics = _telemetry_network_metrics(
+    os.environ.get("TELEMETRY_NETWORK_METRICS", ",".join(network_report_metrics))
+)
+
+telemetry_registry: AssetRegistry | None = None
+telemetry_window_source: CorrelatedWindowSource | None = None
+telemetry_collector: TelemetryCollector | None = None
+
+if power_telemetry_db_path.exists():
+    if telemetry_assets_path.exists():
+        telemetry_registry = load_asset_registry(telemetry_assets_path)
+    else:
+        fallback_identities = {"pdu_outlet": TELEMETRY_POWER_OUTLET}
+        if os.environ.get("TELEMETRY_NETWORK_HOST_IP"):
+            fallback_identities["ip_address"] = os.environ["TELEMETRY_NETWORK_HOST_IP"]
+        if os.environ.get("TELEMETRY_COMPUTE_INSTANCE"):
+            fallback_identities["instance"] = os.environ["TELEMETRY_COMPUTE_INSTANCE"]
+        telemetry_registry = AssetRegistry({TELEMETRY_ASSET_ID: fallback_identities})
+
+    telemetry_power_outlets = telemetry_registry.identities("pdu_outlet")
+    telemetry_network_host_ips = telemetry_registry.identities("ip_address")
+    telemetry_compute_instances = telemetry_registry.identities("instance")
+    telemetry_network_enabled = bool(elasticsearch_url and telemetry_network_host_ips)
+    telemetry_compute_enabled = bool(prometheus_url and telemetry_compute_instances)
+
+    telemetry_pipeline = TelemetryCorrelationPipeline(
+        streams=[
+            TelemetryStream(
+                "power",
+                SqlDataSource() if telemetry_power_outlets else EmptyDataSource(),
+                SourceMapping(
+                    identity_type="pdu_outlet", identity_column="outlet", timestamp_column="ts",
+                    metric_columns={"watts": "power_watts"}, source_system=power_telemetry_source_system,
+                ),
+            ),
+            TelemetryStream(
+                "compute",
+                PrometheusDataSource(http_client) if telemetry_compute_enabled else EmptyDataSource(),
+                SourceMapping(
+                    identity_type="instance", identity_column="instance", timestamp_column="timestamp",
+                    metric_columns={"value": "cpu_utilization"}, source_system="prometheus",
+                ),
+            ),
+            TelemetryStream(
+                "network",
+                ElasticsearchDataSource(http_client) if telemetry_network_enabled else EmptyDataSource(),
+                SourceMapping(
+                    identity_type="ip_address", identity_column="key.host", timestamp_column="key.ts",
+                    metric_columns={"doc_count": "network_event_count"}, source_system="elasticsearch",
+                    extra_columns={name: name for name in telemetry_network_metrics},
+                ),
+            ),
+        ],
+        registry=telemetry_registry,
+        bucket_minutes=telemetry_bucket_minutes,
+    )
+
+    def _unconfigured(window: TimeWindow, bucket_minutes: int) -> SourceQuery:
+        return SourceQuery(address="unconfigured")
+
+    telemetry_query_builders = {
+        "power": (
+            (lambda window, bucket_minutes: sql_power_buckets(
+                str(power_telemetry_db_path), window, bucket_minutes, telemetry_power_outlets,
+            ))
+            if telemetry_power_outlets
+            else _unconfigured
+        ),
+        "compute": (
+            (lambda window, bucket_minutes: prometheus_compute_window(
+                prometheus_url, window,
+                telemetry_compute_instances, bucket_minutes, prometheus_credentials,
+            ))
+            if telemetry_compute_enabled
+            else _unconfigured
+        ),
+        "network": (
+            (lambda window, bucket_minutes: es_network_window(
+                elasticsearch_url, telemetry_es_index_pattern, window,
+                telemetry_network_host_ips, bucket_minutes, elasticsearch_credentials,
+                host_field=telemetry_network_host_field, timestamp_field=network_timestamp_field,
+                metrics=telemetry_network_metrics,
+            ))
+            if telemetry_network_enabled
+            else _unconfigured
+        ),
+    }
+
+    telemetry_collector = TelemetryCollector(
+        telemetry_pipeline,
+        telemetry_query_builders,
+        telemetry_store_path,
+        poll_interval_seconds=telemetry_poll_interval_seconds,
+    )
+    telemetry_window_source = CorrelatedWindowSource(
+        telemetry_pipeline,
+        telemetry_query_builders,
+        min_bucket_minutes=telemetry_bucket_minutes,
+        series_count=max(len(telemetry_network_host_ips), len(telemetry_compute_instances), 1),
+    )
+    register_telemetry_control_tools(mcp, telemetry_collector)
+    register_telemetry_resources(mcp, telemetry_collector)
+
+
+# --- assistant persona: memory and data sources ---------------------------
+_assistant_data_dir = _repo_root / "data" / "assistant"
 assistant_memory_path = Path(os.environ.get("ASSISTANT_MEMORY_PATH", str(_assistant_data_dir / "memory.jsonl")))
 assistant_cache_path = Path(os.environ.get("ASSISTANT_CACHE_PATH", str(_assistant_data_dir / "cache.jsonl")))
 
@@ -201,24 +374,11 @@ assistant_data_sources = (
     {"web_search": TavilySearchSource(http_client, api_key=tavily_api_key)} if tavily_api_key else {}
 )
 
-# optional: gives the assistant read access to the power telemetry sqlite
-# seeded by scratch_power_seed.py — registers no-op if the file doesn't
-# exist, same graceful-degrade shape as the rest of this composition root.
-_repo_root = Path(__file__).resolve().parents[3]
-power_telemetry_db_path = Path(
-    os.environ.get("POWER_TELEMETRY_DB_PATH", str(_repo_root / "power_telemetry.sqlite"))
-)
-if power_telemetry_db_path.exists():
+# optional: power readings (raw and per window) and the on-demand correlated
+# window — both exist exactly when the telemetry section above was built.
+if telemetry_window_source is not None:
     assistant_data_sources["power_telemetry"] = SqlDataSource()
-
-# optional: gives the assistant read access to the platform collector's
-# correlated store (written by the telemetry section below) — gated the same
-# way as the collector itself, so the tool exists exactly when the store can.
-telemetry_store_path = Path(os.environ.get(
-    "TELEMETRY_STORE_PATH", str(_repo_root / "data" / "telemetry" / "canonical_records.jsonl")
-))
-if power_telemetry_db_path.exists():
-    assistant_data_sources["correlated_telemetry"] = JsonlTableSource()
+    assistant_data_sources["correlated_telemetry"] = telemetry_window_source
 
 assistant_persona = PersonaProfile(
     name="assistant",
@@ -255,105 +415,15 @@ register_assistant_tools(mcp, assistant_pipeline)
 register_assistant_resources(mcp, assistant_pipeline, model_name=assistant_model_name)
 if tavily_api_key:
     register_web_search_tool(mcp, assistant_pipeline)
-if power_telemetry_db_path.exists():
+if telemetry_window_source is not None:
     register_power_telemetry_tool(mcp, assistant_pipeline, power_telemetry_db_path)
-    register_correlated_telemetry_tool(mcp, assistant_pipeline, telemetry_store_path)
-
-
-# --- platform: continuous telemetry collection ---------------------------
-# Shared infrastructure, not owned by any persona: one collector feeding one
-# canonical store (telemetry_store_path, defined above so the assistant can
-# be given read access to it) that any persona's reasoning can draw on.
-# Every stream always exists — backed by its real system when configured,
-# otherwise by EmptyDataSource — so the pipeline's shape never depends on
-# which env vars happen to be set. Registers no-op unless the power
-# telemetry db exists. Code defaults are production cadence (5-min buckets,
-# 300s poll); demo cadence is set in .env.
-TELEMETRY_ASSET_ID = "FBA-1"           # demo registry: one synthetic asset
-TELEMETRY_POWER_OUTLET = "R42-U18"     # matches scratch_power_seed.py / the power simulator
-
-telemetry_bucket_minutes = int(os.environ.get("TELEMETRY_BUCKET_MINUTES", "5"))
-telemetry_poll_interval_seconds = float(os.environ.get("TELEMETRY_POLL_INTERVAL_SECONDS", "300"))
-# The network stream reads the same real index and fields as network_monitoring
-# unless overridden. The host field must hold ONE IP per event (source.ip,
-# host.ip), never a multi-valued one like related.ip: the composite query's
-# bucket budget assumes one bucket per (host, time bucket).
-telemetry_network_host_ip = os.environ.get("TELEMETRY_NETWORK_HOST_IP")
-telemetry_es_index_pattern = os.environ.get("TELEMETRY_ES_INDEX_PATTERN", network_index_pattern)
-telemetry_network_host_field = os.environ.get("TELEMETRY_NETWORK_HOST_FIELD", network_host_field)
-telemetry_network_enabled = bool(elasticsearch_url and telemetry_network_host_ip)
-telemetry_compute_instance = os.environ.get("TELEMETRY_COMPUTE_INSTANCE")
-telemetry_compute_enabled = bool(prometheus_url and telemetry_compute_instance)
-
-
-if power_telemetry_db_path.exists():
-    asset_identities = {"pdu_outlet": TELEMETRY_POWER_OUTLET}
-    if telemetry_network_enabled:
-        asset_identities["ip_address"] = telemetry_network_host_ip
-    if telemetry_compute_enabled:
-        asset_identities["instance"] = telemetry_compute_instance
-    telemetry_registry = AssetRegistry({TELEMETRY_ASSET_ID: asset_identities})
-
-    telemetry_pipeline = TelemetryCorrelationPipeline(
-        streams=[
-            TelemetryStream(
-                "power",
-                SqlDataSource(),
-                SourceMapping(
-                    identity_type="pdu_outlet", identity_column="outlet", timestamp_column="ts",
-                    metric_columns={"watts": "power_watts"}, source_system="synthetic_dcim",
-                ),
-            ),
-            TelemetryStream(
-                "compute",
-                PrometheusDataSource(http_client) if telemetry_compute_enabled else EmptyDataSource(),
-                SourceMapping(
-                    identity_type="instance", identity_column="instance", timestamp_column="timestamp",
-                    metric_columns={"value": "cpu_utilization"}, source_system="prometheus",
-                ),
-            ),
-            TelemetryStream(
-                "network",
-                ElasticsearchDataSource(http_client) if telemetry_network_enabled else EmptyDataSource(),
-                SourceMapping(
-                    identity_type="ip_address", identity_column="key.host", timestamp_column="key.ts",
-                    metric_columns={"doc_count": "network_event_count"}, source_system="elasticsearch",
-                ),
-            ),
-        ],
-        registry=telemetry_registry,
-        bucket_minutes=telemetry_bucket_minutes,
+    register_power_consumption_tool(
+        mcp, assistant_pipeline, power_telemetry_db_path, telemetry_registry,
+        source_system=power_telemetry_source_system, default_hours_back=network_chat_hours_back,
     )
-
-    telemetry_query_builders = {
-        "power": lambda window: sql_power_window(str(power_telemetry_db_path), window),
-        "compute": (
-            (lambda window: prometheus_compute_window(
-                prometheus_url, window,
-                [telemetry_compute_instance], telemetry_bucket_minutes, prometheus_credentials,
-            ))
-            if telemetry_compute_enabled
-            else (lambda window: SourceQuery(address="unconfigured"))
-        ),
-        "network": (
-            (lambda window: es_network_window(
-                elasticsearch_url, telemetry_es_index_pattern, window,
-                [telemetry_network_host_ip], telemetry_bucket_minutes, elasticsearch_credentials,
-                host_field=telemetry_network_host_field, timestamp_field=network_timestamp_field,
-            ))
-            if telemetry_network_enabled
-            else (lambda window: SourceQuery(address="unconfigured"))
-        ),
-    }
-
-    telemetry_collector = TelemetryCollector(
-        telemetry_pipeline,
-        telemetry_query_builders,
-        telemetry_store_path,
-        poll_interval_seconds=telemetry_poll_interval_seconds,
+    register_correlated_telemetry_tool(
+        mcp, assistant_pipeline, telemetry_window_source, default_hours_back=network_chat_hours_back,
     )
-    register_telemetry_control_tools(mcp, telemetry_collector)
-    register_telemetry_resources(mcp, telemetry_collector)
 
 
 Transport = Literal["stdio", "sse", "streamable-http"]

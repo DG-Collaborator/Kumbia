@@ -56,12 +56,23 @@ class TelemetryCorrelationPipeline:
     def bucket_minutes(self) -> int:
         return self._bucket_minutes
 
-    async def correlate(self, queries: dict[str, SourceQuery]) -> list[CanonicalRecord]:
+    @property
+    def registry(self) -> AssetRegistry:
+        return self._registry
+
+    async def correlate(
+            self,
+            queries: dict[str, SourceQuery],
+            bucket_minutes: int | None = None,
+    ) -> list[CanonicalRecord]:
         """
            Fetches every stream with its own query (keyed by stream name),
            concurrently, and joins the results. queries must name exactly
            this pipeline's streams — a missing or unknown name is a caller
            bug, so it fails loudly instead of silently skipping a domain.
+           bucket_minutes overrides the pipeline's bucket size for this call
+           (an on-demand report over a long window uses coarser buckets than
+           continuous collection); the queries must be built for the same size.
         """
         expected = set(self.stream_names)
         if set(queries) != expected:
@@ -75,5 +86,5 @@ class TelemetryCorrelationPipeline:
         return correlate_streams(
             [(table, stream.mapping) for table, stream in zip(tables, self._streams)],
             self._registry,
-            self._bucket_minutes,
+            bucket_minutes or self._bucket_minutes,
         )

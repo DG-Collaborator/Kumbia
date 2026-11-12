@@ -12,7 +12,9 @@
      after it has closed — no duplicates, no half-filled records.
 
      Queries are built per cycle by code-supplied builders (one per stream
-     name) from a TimeWindow of real datetimes — never from user or LLM text.
+     name) from a TimeWindow of real datetimes and the bucket size — never
+     from user or LLM text. The same builders serve on-demand window reports
+     (telemetry.window_source), which pass a coarser bucket for long windows.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ from kumbia.telemetry.canonical_record_store import append_records, latest_times
 from kumbia.telemetry.pipeline import TelemetryCorrelationPipeline
 from kumbia.telemetry.stream_queries import TimeWindow
 
-QueryBuilder = Callable[[TimeWindow], SourceQuery]
+QueryBuilder = Callable[[TimeWindow, int], SourceQuery]  # (window, bucket_minutes) -> query
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +164,7 @@ class TelemetryCollector:
         end = min(end, start + self._max_window)
 
         window = TimeWindow(start, end)
-        queries = {name: build(window) for name, build in self._query_builders.items()}
+        queries = {name: build(window, self.bucket_minutes) for name, build in self._query_builders.items()}
         records = await self._pipeline.correlate(queries)
         append_records(self._store_path, records)
 

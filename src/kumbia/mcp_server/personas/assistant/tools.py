@@ -1,7 +1,8 @@
 """
        Conversational assistant persona: registers answer_question, remember,
        assistant://status, and — when their data sources are configured —
-       web_search, power_telemetry_report, and correlated_telemetry_report.
+       web_search, power_telemetry_report, power_consumption_report, and
+       correlated_telemetry_report.
        Tool bodies stay thin — all conversation/memory logic lives in the
        pipeline, and all telemetry figures are computed in telemetry.analysis;
        this file only adapts MCP's argument/return shape to those calls.
@@ -10,18 +11,22 @@
 """
 from __future__ import annotations
 
-import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
 from kumbia.core.source.source_query import SourceQuery
 from kumbia.rag.conversation_pipeline import ConversationPipeline, Skill
+from kumbia.rag.question_parsing import MAX_HOURS_BACK, hours_from_question
+from kumbia.telemetry import power_report
 from kumbia.telemetry.analysis import summary_text
+from kumbia.telemetry.asset_registry import AssetRegistry
+from kumbia.telemetry.stream_queries import plan_window, sql_power_buckets
+from kumbia.telemetry.window_source import CorrelatedWindowSource
 
 _MAX_POWER_TELEMETRY_LIMIT = 500
-_MAX_CORRELATED_TELEMETRY_LIMIT = 1440  # one day of 1-minute buckets
 
 _started_at = time.monotonic()
 
@@ -112,54 +117,131 @@ def register_power_telemetry_tool(mcp: MCPServer, pipeline: ConversationPipeline
 
     pipeline.add_skill(Skill(
         name="power_telemetry_report",
-        description="the latest raw power readings (PDU outlet, timestamp, watts). "
-                    "For the current or most recent power reading of an outlet.",
+        description="the few most recent raw power readings (PDU outlet, timestamp, watts). Only for the "
+                    "current or latest reading right now, not for any period of time.",
         run=report,
     ))
 
     @mcp.tool()
     async def power_telemetry_report(question: str, limit: int = 20) -> str:
         """
-           Ask a free-text question grounded in recent power telemetry
-           readings (outlet, timestamp, watts) from the persona's power
-           telemetry data source. Fetches the most recent `limit` readings
-           (newest first, capped at 500) and answers using only that data —
-           the SQL itself is fixed here, never built from the question.
+           Ask a free-text question grounded in the most recent raw power
+           telemetry readings (outlet, timestamp, watts). Fetches the newest
+           `limit` readings (capped at 500) and answers using only that data
+           — the SQL itself is fixed here, never built from the question. For
+           consumption over a period, use power_consumption_report.
         """
         return await report(question, limit)
 
 
-def register_correlated_telemetry_tool(mcp: MCPServer, pipeline: ConversationPipeline, store_path: Path) -> None:
+def register_power_consumption_tool(
+        mcp: MCPServer,
+        pipeline: ConversationPipeline,
+        db_path: Path,
+        registry: AssetRegistry,
+        source_system: str,
+        default_hours_back: int = 24,
+) -> None:
+    """
+       Power consumption over a trailing window for every registered outlet:
+       figures from telemetry.power_report (computed by code), narrated. The
+       window comes from the question by regex (or the tool's hours_back),
+       the outlets from the registry — never from the model.
+    """
 
-    async def report(question: str, limit: int = 60) -> str:
-        bounded_limit = max(1, min(int(limit), _MAX_CORRELATED_TELEMETRY_LIMIT))
-        query = SourceQuery(address=str(store_path), statement=json.dumps({"last": bounded_limit}))
+    def asset_for_outlet(outlet: str) -> str | None:
+        return registry.resolve("pdu_outlet", outlet)
+
+    async def report(question: str, hours_back: int | None = None) -> str:
+        hours = _bounded_hours(hours_back) if hours_back else hours_from_question(question, default_hours_back)
+        outlets = registry.identities("pdu_outlet")
+        if not outlets:
+            return "No PDU outlets are registered, so there is no power data to report."
+        plan = plan_window(
+            hours, _utc_now(), power_report.MIN_BUCKET_MINUTES, len(outlets), power_report.MAX_BUCKET_ROWS,
+        )
+        query = sql_power_buckets(str(db_path), plan.window, plan.bucket_minutes, outlets)
         return await pipeline.narrate_structured_source(
-            "correlated_telemetry", query, question, summarize=summary_text,
+            "power_telemetry", query, question,
+            summarize=lambda table: power_report.power_figures_text(table, plan, asset_for_outlet, source_system),
+            on_empty=f"{plan.describe()}.\nNo power readings from the registered outlets "
+                     f"({', '.join(outlets)}) in this window.",
         )
 
     pipeline.add_skill(Skill(
-        name="correlated_telemetry_report",
-        description="the monitored asset's collected telemetry per time bucket: power draw (watts), "
-                    "CPU utilization, and its own network event count, correlated with each other. "
-                    "For trends, peaks, lows, and changes in power or CPU, and how power, CPU, and "
-                    "the asset's network activity move together. Not for hosts, DNS names, or "
-                    "network-wide traffic.",
+        name="power_consumption_report",
+        description="power consumption of the monitored system over a time window (default the last "
+                    f"{default_hours_back} hours): average, highest and lowest power draw in watts, when it "
+                    "peaked, how it changed, and energy used in kWh, per asset and in total. For any overview, "
+                    "summary, total, trend, or peak of power, electricity, or energy use.",
         run=report,
     ))
 
     @mcp.tool()
-    async def correlated_telemetry_report(question: str, limit: int = 60) -> str:
+    async def power_consumption_report(question: str, hours_back: int | None = None) -> str:
         """
-           Ask about trends and relationships in the most recent correlated
-           telemetry — power, compute, and network readings already joined
-           per asset and per time bucket by the platform's background
-           collector. Reads the newest `limit` records (capped at 1440) and
-           answers from figures computed deterministically over all of them
-           (start/end and change, peak and low, and how strongly each pair
-           of metrics moves together); the model only narrates those figures,
-           which are returned alongside its answer. Only has data once
-           telemetry collection has been started; the query itself is fixed
-           here, never built from the question.
+           Power consumption over a trailing window for every registered PDU
+           outlet: average, highest, and lowest draw (watts) with when they
+           happened, first-to-last change, coverage of the window, and energy
+           used (kWh), per asset and as a system total. Figures are computed
+           deterministically and returned alongside a narration of them.
+           hours_back sets the window; when unset, it's read from the question
+           ("past 3 days"), defaulting to the server's chat window.
         """
-        return await report(question, limit)
+        return await report(question, hours_back)
+
+
+def register_correlated_telemetry_tool(
+        mcp: MCPServer,
+        pipeline: ConversationPipeline,
+        window_source: CorrelatedWindowSource,
+        default_hours_back: int = 24,
+) -> None:
+    """
+       window_source must also be the persona's "correlated_telemetry" data
+       source; it's passed here as well so the tool can plan the window it
+       reads (and say which window that was) before fetching.
+    """
+
+    async def report(question: str, hours_back: int | None = None) -> str:
+        hours = _bounded_hours(hours_back) if hours_back else hours_from_question(question, default_hours_back)
+        plan = window_source.plan(hours)
+        return await pipeline.narrate_structured_source(
+            "correlated_telemetry", window_source.query_for(plan), question,
+            summarize=lambda table: summary_text(table, header=plan.describe()),
+            on_empty=f"{plan.describe()}.\nNo power, compute, or network telemetry for any registered asset "
+                     "in this window.",
+        )
+
+    pipeline.add_skill(Skill(
+        name="correlated_telemetry_report",
+        description="how the monitored assets' power draw, CPU utilization, and their own network traffic "
+                    "(events, bytes, and other configured network metrics) relate over a time window: whether "
+                    "power rises and falls with traffic or CPU, how strongly they move together, and each "
+                    "one's peak, low, and change. For any question that combines power with network or "
+                    "compute data. Not for network-wide traffic, or which hosts talked to which.",
+        run=report,
+    ))
+
+    @mcp.tool()
+    async def correlated_telemetry_report(question: str, hours_back: int | None = None) -> str:
+        """
+           Ask about trends and relationships across power, compute, and
+           network telemetry, joined per registered asset and per time bucket
+           straight from the live sources for the requested window — no
+           background collection needed. Answers from figures computed
+           deterministically over every bucket (start/end and change, peak
+           and low, and how strongly each pair of metrics moves together);
+           the model only narrates those figures, which are returned
+           alongside its answer. hours_back sets the window; when unset, it's
+           read from the question, defaulting to the server's chat window.
+        """
+        return await report(question, hours_back)
+
+
+def _bounded_hours(hours_back: int) -> int:
+    return max(1, min(int(hours_back), MAX_HOURS_BACK))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

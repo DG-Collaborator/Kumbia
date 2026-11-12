@@ -9,7 +9,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+import re
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 
 from kumbia.core.domain.data_table import DataTable
@@ -23,6 +24,8 @@ from kumbia.telemetry.canonical_record import CanonicalRecord
     reading field added there is automatically joinable here with no edit.
 """
 _READING_FIELDS = frozenset(f.name for f in fields(CanonicalRecord) if f.type == "float | None")
+_ALL_FIELDS = frozenset(f.name for f in fields(CanonicalRecord))
+_EXTRA_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -30,14 +33,16 @@ class SourceMapping:
     """
        Describes how to read one telemetry source's generic DataTable:
        which column holds the raw identity (and what identity_type that is,
-       for AssetRegistry.resolve), which column holds the timestamp, and
-       which columns carry which CanonicalRecord reading fields.
+       for AssetRegistry.resolve), which column holds the timestamp, which
+       columns carry which CanonicalRecord reading fields, and which carry
+       configuration-dependent extra readings (column -> extra reading name).
     """
     identity_type: str
     identity_column: str
     timestamp_column: str
     metric_columns: dict[str, str]  # DataTable column key -> CanonicalRecord field name
     source_system: str
+    extra_columns: dict[str, str] = field(default_factory=dict)  # DataTable column key -> extra reading name
 
 
 def correlate_streams(
@@ -61,23 +66,23 @@ def correlate_streams(
         asset_id, bucket = key
         source_systems: set[str] = set()
         readings: dict[str, float] = {}
+        extras: dict[str, float] = {}
         for entries in per_stream:
             entry = entries.get(key)
             if entry is None:
                 continue
             source_systems |= entry["source_systems"]
-            readings.update({name: value for name, value in entry.items() if name != "source_systems"})
+            readings.update(entry["readings"])
+            extras.update(entry["extras"])
 
         records.append(CanonicalRecord(
             timestamp=bucket,
             asset_id=asset_id,
             source_system="+".join(sorted(source_systems)),
+            extra_readings=extras,
             **readings,
         ))
     return records
-
-
-
 
 
 def _validate(mapping: SourceMapping) -> None:
@@ -85,6 +90,8 @@ def _validate(mapping: SourceMapping) -> None:
        Fails loudly on a metric_columns target that isn't a CanonicalRecord
        reading field — a typo'd mapping would otherwise silently drop that
        stream's readings (or crash later inside CanonicalRecord(**readings)).
+       Extra reading names must be plain lowercase identifiers that don't
+       shadow a record field, since stores flatten them next to those fields.
     """
     unknown = set(mapping.metric_columns.values()) - _READING_FIELDS
     if unknown:
@@ -92,6 +99,12 @@ def _validate(mapping: SourceMapping) -> None:
             f"SourceMapping for '{mapping.source_system}' targets unknown reading field(s) "
             f"{sorted(unknown)}; valid fields are {sorted(_READING_FIELDS)}."
         )
+    for name in mapping.extra_columns.values():
+        if not _EXTRA_NAME_RE.fullmatch(name) or name in _ALL_FIELDS:
+            raise ValueError(
+                f"SourceMapping for '{mapping.source_system}' has an invalid extra reading name {name!r}: "
+                "use a lowercase identifier that isn't a CanonicalRecord field."
+            )
 
 
 def _extract(
@@ -118,12 +131,16 @@ def _extract(
         bucket = _floor_to_bucket(raw_timestamp, bucket_minutes)
 
         key = (asset_id, bucket)
-        entry = entries.setdefault(key, {"source_systems": set()})
+        entry = entries.setdefault(key, {"source_systems": set(), "readings": {}, "extras": {}})
         entry["source_systems"].add(mapping.source_system)
         for column_key, field_name in mapping.metric_columns.items():
             value = _to_float(row.value(column_key))
             if value is not None:
-                entry[field_name] = value
+                entry["readings"][field_name] = value
+        for column_key, extra_name in mapping.extra_columns.items():
+            value = _to_float(row.value(column_key))
+            if value is not None:
+                entry["extras"][extra_name] = value
 
     return entries
 

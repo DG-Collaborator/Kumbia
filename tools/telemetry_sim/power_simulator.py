@@ -1,15 +1,16 @@
 """
       Dev-only: makes the power stream live. Once per interval, appends one
       reading for a PDU outlet to power_telemetry.sqlite's power_readings
-      table, timestamped now (ISO-8601 UTC, the same format the seed data and
-      sql_power_window use). Watts follow load_profile — shared with the
-      network simulator — plus a little noise, so power tracks network
-      activity the way a real loaded server would.
+      table, timestamped now (ISO-8601 UTC, the same format power_backfill.py
+      and sql_power_buckets use). Watts follow load_profile — shared with the
+      network simulator and the backfill, including the same per-outlet
+      offset — plus a little noise, so live readings continue the backfilled
+      history without a jump. Run power_backfill.py first for history.
 
       Writes a couple of seconds into each interval so every reading lands
       inside its time bucket, never on the edge: with --interval-seconds
       equal to TELEMETRY_BUCKET_MINUTES * 60, each bucket gets exactly one
-      reading. Never drops or rewrites existing rows (the Sept seed data stays).
+      reading. Never drops or rewrites existing rows.
       Not part of the server — stdlib only, no kumbia imports. Stop with Ctrl+C.
 
       Usage:
@@ -25,7 +26,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from load_profile import load_at
+from load_profile import load_at, outlet_offset_watts
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _EDGE_OFFSET_SECONDS = 2
@@ -51,7 +52,8 @@ def main() -> None:
             _sleep_until_next_interval(args.interval_seconds)
             now = datetime.now(timezone.utc).replace(microsecond=0)
             watts = round(
-                args.idle_watts + (args.peak_watts - args.idle_watts) * load_at(now) + random.uniform(-3, 3), 1
+                args.idle_watts + outlet_offset_watts(args.outlet)
+                + (args.peak_watts - args.idle_watts) * load_at(now) + random.uniform(-3, 3), 1
             )
             timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
             with sqlite3.connect(args.db) as connection:

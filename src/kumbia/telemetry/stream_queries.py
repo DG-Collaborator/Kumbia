@@ -5,7 +5,9 @@
       ends up inside a query string comes from code (a TimeWindow of real
       datetimes, identifier names validated below, a registry's own IPs) —
       never from user or LLM text, same "structural, not instructional" rule
-      as power_telemetry_report's fixed SQL.
+      as power_telemetry_report's fixed SQL. plan_window() turns a number of
+      hours (parsed from a question by regex) into a window of real datetimes
+      and a bucket size, so on-demand reports reuse these same builders.
 
       Windows are half-open, [start, end): the collector asks for exactly the
       buckets that have closed since its last run, so consecutive windows
@@ -23,6 +25,11 @@ from kumbia.core.source.source_query import Credentials, SourceQuery
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _INSTANCE_RE = re.compile(r"^[A-Za-z0-9.:_\-\[\]]+$")
+_SQL_VALUE_RE = re.compile(r"^[A-Za-z0-9.:_\-/]+$")
+
+MAX_COMPOSITE_BUCKETS = 1000  # one page of an Elasticsearch composite aggregation
+_BUCKET_CHOICES_MINUTES = (1, 5, 15, 30, 60, 180, 360, 720, 1440)
+_NETWORK_AGGREGATIONS = frozenset({"sum", "avg", "max"})
 
 
 @dataclass(frozen=True)
@@ -50,27 +57,107 @@ class TimeWindow:
         return (self.end - self.start).total_seconds() / 60
 
 
-def sql_power_window(
+@dataclass(frozen=True)
+class NetworkMetric:
+    """One numeric network field to aggregate per bucket: its field name and sum, avg, or max."""
+    field: str
+    aggregation: str = "sum"
+
+    def __post_init__(self) -> None:
+        if self.aggregation not in _NETWORK_AGGREGATIONS:
+            raise ValueError(f"aggregation must be one of {sorted(_NETWORK_AGGREGATIONS)}, got {self.aggregation!r}")
+
+
+@dataclass(frozen=True)
+class WindowPlan:
+    """A trailing window of whole, closed buckets, and the bucket size it was cut to."""
+    hours_back: int
+    bucket_minutes: int
+    window: TimeWindow
+
+    @property
+    def bucket_count(self) -> int:
+        return math.ceil(self.window.minutes / self.bucket_minutes)
+
+    def describe(self) -> str:
+        return (
+            f"Window: last {self.hours_back} hour(s), {self.window.start_iso} to {self.window.end_iso}, "
+            f"in {self.bucket_minutes}-minute buckets ({self.bucket_count} buckets)"
+        )
+
+
+def plan_window(
+        hours_back: int,
+        now: datetime,
+        min_bucket_minutes: int = 1,
+        series_count: int = 1,
+        max_buckets: int = MAX_COMPOSITE_BUCKETS,
+) -> WindowPlan:
+    """
+       The last hours_back hours as whole buckets that have already closed
+       (the still-filling bucket is left out, same as the collector), with
+       the finest standard bucket size >= min_bucket_minutes that keeps
+       series_count * buckets within max_buckets — so a 1-hour question gets
+       minute detail and a 30-day one still fits one aggregation page.
+    """
+    if hours_back < 1:
+        raise ValueError("hours_back must be at least 1.")
+    minutes = hours_back * 60
+    series = max(1, series_count)
+    candidates = [b for b in _BUCKET_CHOICES_MINUTES if b >= min_bucket_minutes] or [min_bucket_minutes]
+    bucket = next(
+        (b for b in candidates if series * math.ceil(minutes / b) <= max_buckets),
+        candidates[-1],
+    )
+    end = _floor(now, bucket)
+    return WindowPlan(hours_back, bucket, TimeWindow(end - timedelta(hours=hours_back), end))
+
+
+def sql_power_buckets(
         db_path: str,
         window: TimeWindow,
+        bucket_minutes: int,
+        outlets: list[str],
         table: str = "power_readings",
         identity_column: str = "outlet",
         timestamp_column: str = "ts",
         value_column: str = "watts",
 ) -> SourceQuery:
     """
-       Power readings inside the window from a sqlite table whose timestamp
-       column holds ISO-8601 UTC text ("2026-09-24T14:05:00Z"). That format
-       sorts lexicographically in time order, which is what makes a plain
-       string >= / < comparison a correct time filter here.
+       Power readings inside the window, reduced to one row per (outlet,
+       time bucket): the bucket's start as ISO text in the timestamp column,
+       its average watts in the value column, plus <value>_min, <value>_max,
+       and readings (how many readings it averaged). Sources that report
+       more often than the bucket size are averaged rather than having one
+       reading win, and a long window stays a bounded number of rows.
+
+       Reads a sqlite table whose timestamp column holds ISO-8601 UTC text
+       ("2026-09-24T14:05:00Z"). That format sorts lexicographically in time
+       order, which is what makes a plain string >= / < comparison a correct
+       time filter here. Filtered to outlets (the registry's known power
+       identities), so unregistered outlets never come back.
     """
+    if not outlets:
+        raise ValueError("sql_power_buckets needs at least one outlet to filter on.")
     for identifier in (table, identity_column, timestamp_column, value_column):
         _require_identifier(identifier)
+    if bucket_minutes < 1:
+        raise ValueError("bucket_minutes must be at least 1.")
 
+    seconds = bucket_minutes * 60
+    outlet_list = ", ".join(_sql_string_literal(outlet) for outlet in outlets)
+    bucket_start = (
+        f"strftime('%Y-%m-%dT%H:%M:%SZ', "
+        f"(CAST(strftime('%s', {timestamp_column}) AS INTEGER) / {seconds}) * {seconds}, 'unixepoch')"
+    )
     statement = (
-        f"SELECT {identity_column}, {timestamp_column}, {value_column} FROM {table} "
+        f"SELECT {identity_column} AS {identity_column}, {bucket_start} AS {timestamp_column}, "
+        f"AVG({value_column}) AS {value_column}, MIN({value_column}) AS {value_column}_min, "
+        f"MAX({value_column}) AS {value_column}_max, COUNT({value_column}) AS readings "
+        f"FROM {table} "
         f"WHERE {timestamp_column} >= '{window.start_iso}' AND {timestamp_column} < '{window.end_iso}' "
-        f"ORDER BY {timestamp_column}"
+        f"AND {identity_column} IN ({outlet_list}) AND {value_column} IS NOT NULL "
+        f"GROUP BY 1, 2 ORDER BY 2, 1"
     )
     return SourceQuery(address=db_path, statement=statement)
 
@@ -84,12 +171,18 @@ def es_network_window(
         credentials: Credentials | None = None,
         host_field: str = "host.ip",
         timestamp_field: str = "@timestamp",
-        max_buckets: int = 1000,
+        max_buckets: int = MAX_COMPOSITE_BUCKETS,
+        metrics: dict[str, NetworkMetric] | None = None,
 ) -> SourceQuery:
     """
        Event counts per (host, time bucket) inside the window, as one
        Elasticsearch composite aggregation. ElasticsearchDataSource turns
        the response into rows with key.host, key.ts, doc_count columns.
+
+       metrics adds one numeric sub-aggregation per entry (column name ->
+       field and sum/avg/max), each its own column, e.g. bytes sent per
+       bucket beside the event count. Names and fields come from
+       configuration, never from a question.
 
        Filtered to host_ips (the registry's known network identities), so
        unregistered hosts never cost a bucket. The composite's after_key
@@ -106,6 +199,24 @@ def es_network_window(
             "use a shorter window or fewer hosts."
         )
 
+    composite: dict = {
+        "composite": {
+            "size": max_buckets,
+            "sources": [
+                {"host": {"terms": {"field": host_field}}},
+                {"ts": {"date_histogram": {
+                    "field": timestamp_field,
+                    "fixed_interval": f"{bucket_minutes}m",
+                    "format": "strict_date_time_no_millis",
+                }}},
+            ],
+        }
+    }
+    if metrics:
+        for name, metric in metrics.items():
+            _require_identifier(name)
+        composite["aggs"] = {name: {metric.aggregation: {"field": metric.field}} for name, metric in metrics.items()}
+
     body = {
         "size": 0,
         "query": {
@@ -116,21 +227,7 @@ def es_network_window(
                 ]
             }
         },
-        "aggs": {
-            "by_host_bucket": {
-                "composite": {
-                    "size": max_buckets,
-                    "sources": [
-                        {"host": {"terms": {"field": host_field}}},
-                        {"ts": {"date_histogram": {
-                            "field": timestamp_field,
-                            "fixed_interval": f"{bucket_minutes}m",
-                            "format": "strict_date_time_no_millis",
-                        }}},
-                    ],
-                }
-            }
-        },
+        "aggs": {"by_host_bucket": composite},
     }
     return SourceQuery(
         address=f"{base_url.rstrip('/')}/{index_pattern}/_search",
@@ -197,6 +294,18 @@ def _require_identifier(name: str) -> None:
     """SQL/PromQL identifiers can't be bound as parameters, so they're restricted to plain names instead."""
     if not _IDENTIFIER_RE.fullmatch(name):
         raise ValueError(f"Not a plain SQL identifier: {name!r}")
+
+
+def _sql_string_literal(value: str) -> str:
+    """A registry value (an outlet name) as a quoted SQL string, restricted to plain name characters first."""
+    if not _SQL_VALUE_RE.fullmatch(value):
+        raise ValueError(f"Not a plain identity value: {value!r}")
+    return f"'{value}'"
+
+
+def _floor(dt: datetime, bucket_minutes: int) -> datetime:
+    epoch_minutes = int(dt.timestamp() // 60)
+    return datetime.fromtimestamp((epoch_minutes // bucket_minutes) * bucket_minutes * 60, tz=timezone.utc)
 
 
 def _promql_regex_literal(value: str) -> str:

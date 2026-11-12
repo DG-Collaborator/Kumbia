@@ -221,6 +221,7 @@ class ConversationPipeline:
             query: SourceQuery,
             question: str,
             summarize: Callable[[DataTable], str],
+            on_empty: str | None = None,
     ) -> str:
         """
            Like query_structured_source, but for questions whose answer is a
@@ -228,13 +229,14 @@ class ConversationPipeline:
            summarize turns the fetched table into figures deterministically,
            and the LLM is only asked to narrate those figures. Returns the
            figures followed by the narration, so the exact numbers are always
-           visible next to the model's wording.
+           visible next to the model's wording. on_empty replaces the generic
+           reply when the fetch returns nothing (e.g. naming the window read).
         """
         await self.ensure_memory_loaded()
         source = self._require_data_source(name)
         table = await source.fetch(query)
         if table.is_empty:
-            return "I couldn't find anything for that."
+            return on_empty or "I couldn't find anything for that."
 
         figures = summarize(table)
         system_prompt = f"{self._persona.system_prompt}\n\n{_NARRATION_INSTRUCTIONS}\n\nFigures:\n{figures}"
